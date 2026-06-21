@@ -1,0 +1,14 @@
+[project]
+name = "trade-planner"
+version = "0.1.0"
+description = "Pluggable daily basket execution planner."
+requires-python = ">=3.10"
+dependencies = [
+    "cvxpy",
+    "numpy",
+    "osqp",
+    "pandas",
+]
+
+[tool.setuptools]
+packages = ["trade_planner"]
