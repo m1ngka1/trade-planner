@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from .constraints import ConstraintPlugin, default_constraints
 from .costs import CompositeCostModel, LinearBpsCost, QuadraticParticipationImpact
 from .participation import LogisticEarningsParticipation, ParticipationCapModel
-from .risk import ExponentialEarningsRiskOverlay, StaticCovarianceRiskModel
+from .risk import BarraFactorRiskModel, ExponentialEarningsRiskOverlay, RiskModel
 
 
 @dataclass(frozen=True)
 class TradePlannerConfig:
     participation_model: ParticipationCapModel
-    risk_model: StaticCovarianceRiskModel
+    risk_model: RiskModel
     cost_model: CompositeCostModel
     constraints: tuple[ConstraintPlugin, ...] = default_constraints()
     residual_risk_weight: float = 1.0
@@ -33,9 +33,8 @@ def default_earnings_aware_config() -> TradePlannerConfig:
                 )
             ]
         ),
-        risk_model=StaticCovarianceRiskModel(
-            covariance=None,
-            overlays=[
+        risk_model=BarraFactorRiskModel(
+            specific_overlays=[
                 ExponentialEarningsRiskOverlay(
                     event_vol_column="event_vol",
                     tau_days=5.0,

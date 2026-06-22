@@ -16,12 +16,20 @@ from .constraints import (
 )
 from .context import PlannerContext, build_context, days_to_next_event
 from .costs import CompositeCostModel, EarningsLinearPenalty, LinearBpsCost, QuadraticParticipationImpact
+from .data import FactorRiskData, PlannerDataProvider, build_context_from_provider
 from .participation import LogisticEarningsParticipation, ParticipationCapModel, PiecewiseEarningsParticipation
 from .planner import TradePlanner, TradePlannerResult
-from .risk import ExponentialEarningsRiskOverlay, StaticCovarianceRiskModel
+from .risk import (
+    BarraFactorRiskModel,
+    ExponentialEarningsRiskOverlay,
+    RiskModel,
+    SpecificRiskOverlay,
+    StaticCovarianceRiskModel,
+)
 from .types import InfeasiblePlanError
 
 __all__ = [
+    "BarraFactorRiskModel",
     "CompositeCostModel",
     "ConstraintPlugin",
     "DailyGrossNotionalLimit",
@@ -29,6 +37,7 @@ __all__ = [
     "DirectionConstraint",
     "EarningsLinearPenalty",
     "ExponentialEarningsRiskOverlay",
+    "FactorRiskData",
     "FactorExposureLimit",
     "HardCompletionConstraint",
     "InfeasiblePlanError",
@@ -40,13 +49,17 @@ __all__ = [
     "ParticipationCapModel",
     "PiecewiseEarningsParticipation",
     "PlannerContext",
+    "PlannerDataProvider",
     "QuadraticParticipationImpact",
+    "RiskModel",
+    "SpecificRiskOverlay",
     "StaticCovarianceRiskModel",
     "TradePlanner",
     "TradePlannerConfig",
     "TradePlannerResult",
     "ZeroTargetConstraint",
     "build_context",
+    "build_context_from_provider",
     "days_to_next_event",
     "default_constraints",
     "default_earnings_aware_config",

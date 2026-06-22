@@ -96,10 +96,9 @@ class TradePlanner:
         objective_terms: list[cp.Expression] = []
         for date_index, residual in enumerate(state.residuals):
             trade_t = state.trades[date_index, :]
-            residual_dollars = cp.multiply(ctx.price[date_index], residual)
-            sigma = self.config.risk_model.covariance_for_date(ctx, date_index)
             objective_terms.append(
-                self.config.residual_risk_weight * cp.quad_form(residual_dollars, sigma)
+                self.config.residual_risk_weight
+                * self.config.risk_model.objective(residual, ctx, date_index)
             )
             objective_terms.append(self.config.cost_model.objective(trade_t, ctx, date_index))
         return objective_terms

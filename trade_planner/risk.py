@@ -5,12 +5,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+import cvxpy as cp
 import numpy as np
 import pandas as pd
 
 from .context import PlannerContext
 from .types import Array
 from .utils import as_psd
+
+
+class RiskModel(Protocol):
+    """Plugin that returns the residual-risk expression for one date."""
+
+    def objective(
+        self,
+        residual_shares: cp.Expression,
+        ctx: PlannerContext,
+        date_index: int,
+    ) -> cp.Expression:
+        ...
 
 
 class RiskOverlay(Protocol):
@@ -22,7 +35,7 @@ class RiskOverlay(Protocol):
 
 @dataclass(frozen=True)
 class StaticCovarianceRiskModel:
-    """Return a base covariance plus optional date-dependent overlays."""
+    """Full security covariance model, retained as a simple fallback."""
 
     covariance: pd.DataFrame | Array | None = None
     overlays: Sequence[RiskOverlay] = ()
@@ -49,6 +62,66 @@ class StaticCovarianceRiskModel:
             matrix = matrix + overlay.covariance_addition(ctx, date_index)
         return as_psd(matrix)
 
+    def objective(
+        self,
+        residual_shares: cp.Expression,
+        ctx: PlannerContext,
+        date_index: int,
+    ) -> cp.Expression:
+        residual_dollars = cp.multiply(ctx.price[date_index], residual_shares)
+        return cp.quad_form(residual_dollars, self.covariance_for_date(ctx, date_index))
+
+
+class SpecificRiskOverlay(Protocol):
+    """Plugin that adds date-dependent specific return variance."""
+
+    def specific_variance_addition(self, ctx: PlannerContext, date_index: int) -> Array:
+        ...
+
+
+@dataclass(frozen=True)
+class BarraFactorRiskModel:
+    """
+    Barra-style factor risk model.
+
+    For residual shares r:
+        w = price * r
+        f = B.T @ w
+        risk = f.T @ Sigma_f @ f + sum_i specific_variance_i * w_i^2
+
+    B is the security-by-factor exposure matrix. The covariance inputs are
+    return covariance/variance, so dollar residuals convert share residuals
+    into portfolio risk dollars.
+    """
+
+    specific_overlays: Sequence[SpecificRiskOverlay] = ()
+
+    def objective(
+        self,
+        residual_shares: cp.Expression,
+        ctx: PlannerContext,
+        date_index: int,
+    ) -> cp.Expression:
+        if ctx.factor_exposure is None or ctx.factor_covariance is None or ctx.specific_variance is None:
+            raise ValueError(
+                "BarraFactorRiskModel requires factor_exposure, factor_covariance, "
+                "and specific_variance in PlannerContext"
+            )
+
+        residual_dollars = cp.multiply(ctx.price[date_index], residual_shares)
+        exposure = ctx.factor_exposure[date_index]
+        factor_covariance = as_psd(ctx.factor_covariance[date_index])
+        factor_dollars = exposure.T @ residual_dollars
+
+        specific_variance = ctx.specific_variance[date_index].copy()
+        for overlay in self.specific_overlays:
+            specific_variance = specific_variance + overlay.specific_variance_addition(ctx, date_index)
+        specific_variance = np.maximum(specific_variance, 0.0)
+
+        factor_risk = cp.quad_form(factor_dollars, factor_covariance)
+        specific_risk = cp.sum(cp.multiply(specific_variance, cp.square(residual_dollars)))
+        return factor_risk + specific_risk
+
 
 @dataclass(frozen=True)
 class ExponentialEarningsRiskOverlay:
@@ -73,3 +146,6 @@ class ExponentialEarningsRiskOverlay:
         finite = np.isfinite(d)
         weight[finite] = np.exp(-d[finite] / self.tau_days)
         return np.diag((event_vol**2) * weight)
+
+    def specific_variance_addition(self, ctx: PlannerContext, date_index: int) -> Array:
+        return np.diag(self.covariance_addition(ctx, date_index)).copy()
