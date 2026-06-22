@@ -133,6 +133,96 @@ class MyProvider(PlannerDataProvider):
 When a new context field is needed, add one provider method and one alignment
 step in `data.py`; the optimizer code should not need to change.
 
+## Optimization Formulation
+
+For symbols `i = 1..N` and planner dates `t = 1..T`, define:
+
+- `q_i`: signed target shares; positive means buy, negative means sell/short
+- `x_{i,t}`: signed shares traded on date `t`
+- `p_{i,t}`: security price
+- `ADV_{i,t}`: average daily volume
+- `rho_{i,t}`: dynamic participation cap
+- `m_{i,t}`: market-open flag
+- `r_t = q - sum_{\tau=1}^t x_\tau`: residual unexecuted shares after date `t`
+
+The planner solves a convex daily execution problem:
+
+```math
+\begin{aligned}
+\min_{\{x_t\}_{t=1}^T}\quad
+& \sum_{t=1}^T
+\lambda_{\mathrm{risk}} R_t(r_t)
++ \sum_{t=1}^T C_t(x_t) \\
+\mathrm{s.t.}\quad
+& \sum_{t=1}^T x_{i,t} = q_i,\quad \forall i \\
+& |x_{i,t}| \le \rho_{i,t} ADV_{i,t} m_{i,t},\quad \forall i,t \\
+& \operatorname{sign}(q_i)x_{i,t} \ge 0,\quad \forall i,t .
+\end{aligned}
+```
+
+The default cost model is:
+
+```math
+C_t(x_t)
+=
+\sum_i \eta_{i,t}x_{i,t}^2
++
+\sum_i c_{i,t}|x_{i,t}|,
+```
+
+where the quadratic term is market impact and the linear term is spread,
+commission, fees, or soft event-window penalties.
+
+The default Barra-style residual risk model is:
+
+```math
+w_t = P_t r_t
+```
+
+```math
+f_t = B_t^\top w_t
+```
+
+```math
+R_t(r_t)
+=
+f_t^\top \Sigma^{F}_t f_t
++
+\sum_i \sigma^2_{\epsilon,i,t} w_{i,t}^2 .
+```
+
+Here:
+
+- `P_t = diag(p_t)` converts residual shares to residual dollars
+- `B_t` is the security-by-factor exposure matrix
+- `Sigma^F_t` is the factor covariance matrix
+- `sigma^2_{\epsilon,i,t}` is specific return variance
+
+With earnings/event risk overlays, the specific variance becomes:
+
+```math
+\tilde{\sigma}^2_{\epsilon,i,t}
+=
+\sigma^2_{\epsilon,i,t}
++
+\sigma^2_{\mathrm{event},i}\exp(-d_{i,t}/\tau),
+```
+
+where `d_{i,t}` is days to next earnings/event. Participation caps can also be
+made event-aware, for example:
+
+```math
+\rho_{i,t}
+=
+\rho_i^{base}
+\left[
+h_{min}
++
+(1-h_{min})
+\frac{1}{1+\exp(-k(d_{i,t}-d_0))}
+\right].
+```
+
 ## Barra-Style Residual Risk
 
 The default risk model is `BarraFactorRiskModel`. For each date it computes:
