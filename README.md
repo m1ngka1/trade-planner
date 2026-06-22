@@ -150,3 +150,21 @@ factor_exposure.T @ factor_covariance @ factor_exposure
 
 This keeps the implementation aligned with a factor-model risk decomposition
 instead of applying a full security covariance matrix directly.
+
+Select active Barra factors in the risk model:
+
+```python
+from trade_planner import BarraFactorRiskModel, ExponentialEarningsRiskOverlay
+
+risk_model = BarraFactorRiskModel(
+    include_factors=["market", "size", "value", "momentum"],
+    exclude_factors=["momentum"],
+    specific_overlays=[
+        ExponentialEarningsRiskOverlay(event_vol_column="event_vol", tau_days=5.0),
+    ],
+)
+```
+
+If `include_factors` is omitted, all factors in `ctx.factor_names` are used.
+`exclude_factors` is applied after `include_factors`, preserving the factor
+order loaded into context.

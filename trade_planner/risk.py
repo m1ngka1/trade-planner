@@ -94,6 +94,8 @@ class BarraFactorRiskModel:
     into portfolio risk dollars.
     """
 
+    include_factors: Sequence[str] | None = None
+    exclude_factors: Sequence[str] = ()
     specific_overlays: Sequence[SpecificRiskOverlay] = ()
 
     def objective(
@@ -108,9 +110,10 @@ class BarraFactorRiskModel:
                 "and specific_variance in PlannerContext"
             )
 
+        factor_idx = self.factor_indices(ctx)
         residual_dollars = cp.multiply(ctx.price[date_index], residual_shares)
-        exposure = ctx.factor_exposure[date_index]
-        factor_covariance = as_psd(ctx.factor_covariance[date_index])
+        exposure = ctx.factor_exposure[date_index][:, factor_idx]
+        factor_covariance = as_psd(ctx.factor_covariance[date_index][np.ix_(factor_idx, factor_idx)])
         factor_dollars = exposure.T @ residual_dollars
 
         specific_variance = ctx.specific_variance[date_index].copy()
@@ -121,6 +124,35 @@ class BarraFactorRiskModel:
         factor_risk = cp.quad_form(factor_dollars, factor_covariance)
         specific_risk = cp.sum(cp.multiply(specific_variance, cp.square(residual_dollars)))
         return factor_risk + specific_risk
+
+    def factor_indices(self, ctx: PlannerContext) -> list[int]:
+        """Return selected factor indices, preserving context factor order."""
+        if ctx.factor_names is None:
+            raise ValueError("BarraFactorRiskModel requires factor_names in PlannerContext")
+
+        available = [str(factor) for factor in ctx.factor_names]
+        available_set = set(available)
+
+        if self.include_factors is None:
+            selected = available
+        else:
+            include_set = {str(factor) for factor in self.include_factors}
+            missing = sorted(include_set - available_set)
+            if missing:
+                raise ValueError(f"include_factors are not available in context: {missing}")
+            selected = [factor for factor in available if factor in include_set]
+
+        exclude_set = {str(factor) for factor in self.exclude_factors}
+        missing_excludes = sorted(exclude_set - available_set)
+        if missing_excludes:
+            raise ValueError(f"exclude_factors are not available in context: {missing_excludes}")
+
+        selected = [factor for factor in selected if factor not in exclude_set]
+        if not selected:
+            raise ValueError("BarraFactorRiskModel selected zero factors")
+
+        index_by_name = {factor: index for index, factor in enumerate(available)}
+        return [index_by_name[factor] for factor in selected]
 
 
 @dataclass(frozen=True)
