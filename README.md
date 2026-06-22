@@ -4,8 +4,8 @@ Pluggable daily basket execution planner for signed multi-name orders.
 
 The package is intentionally split by extension point:
 
-- `context.py`: input normalization, market panel handling, earnings/event days
-- `data.py`: provider interface for loading market data and Barra-style risk data
+- `context.py`: normalized `PlannerContext` data object and date utilities
+- `data.py`: provider placeholders, field alignment, and context assembly
 - `participation.py`: participation caps and cap multipliers
 - `risk.py`: covariance models and residual-risk overlays
 - `costs.py`: market-impact and linear-cost objective terms
@@ -95,10 +95,43 @@ result = TradePlanner(default_earnings_aware_config()).solve(ctx)
 
 The provider implements:
 
-- `load_market_data(symbols, dates)`: returns `(date, symbol)` rows with `price`, `adv_shares`, `is_open`, and optional `base_participation`
-- `load_event_dates(symbols, start_date, end_date)`: returns next earnings/event dates
-- `load_factor_risk_data(symbols, dates)`: returns factor exposures, factor covariance, and specific variance
+- `load_price(symbols, dates)`
+- `load_adv_shares(symbols, dates)`
+- `load_is_open(symbols, dates)`; defaults to `True`
+- `load_base_participation(symbols, dates)`; defaults to the builder's `default_participation`
+- `load_event_days(symbols, dates)`, or implement `load_event_dates(symbols, start_date, end_date)` and use the default event-day calculation
+- `load_factor_exposure(symbols, dates)`
+- `load_factor_covariance(factor_names, dates)`
+- `load_specific_variance(symbols, dates)`
 - optional `load_event_volatility(symbols, dates)`: returns event jump volatility used by the earnings risk overlay
+
+Minimal provider skeleton:
+
+```python
+from trade_planner import PlannerDataProvider
+
+class MyProvider(PlannerDataProvider):
+    def load_price(self, symbols, dates):
+        ...
+
+    def load_adv_shares(self, symbols, dates):
+        ...
+
+    def load_event_days(self, symbols, dates):
+        ...
+
+    def load_factor_exposure(self, symbols, dates):
+        ...
+
+    def load_factor_covariance(self, factor_names, dates):
+        ...
+
+    def load_specific_variance(self, symbols, dates):
+        ...
+```
+
+When a new context field is needed, add one provider method and one alignment
+step in `data.py`; the optimizer code should not need to change.
 
 ## Barra-Style Residual Risk
 
