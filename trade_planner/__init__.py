@@ -2,6 +2,7 @@
 
 from .config import TradePlannerConfig, default_earnings_aware_config
 from .constraints import (
+    ConstraintDiagnostics,
     ConstraintPlugin,
     DailyGrossNotionalLimit,
     DailyNetNotionalLimit,
@@ -13,6 +14,8 @@ from .constraints import (
     ParticipationCapacityConstraint,
     ZeroTargetConstraint,
     default_constraints,
+    get_constraint_diagnostics,
+    with_diagnostics,
 )
 from .context import PlannerContext, days_to_next_event
 from .costs import CompositeCostModel, EarningsLinearPenalty, LinearBpsCost, QuadraticParticipationImpact
@@ -29,6 +32,7 @@ from .data import (
     build_planner_dates,
     normalize_orders,
 )
+from .diagnostics import diagnose_infeasible_problem, elastic_feasibility_report, format_infeasibility_diagnosis
 from .participation import LogisticEarningsParticipation, ParticipationCapModel, PiecewiseEarningsParticipation
 from .planner import TradePlanner, TradePlannerResult
 from .risk import (
@@ -43,6 +47,7 @@ from .types import InfeasiblePlanError
 __all__ = [
     "BarraFactorRiskModel",
     "CompositeCostModel",
+    "ConstraintDiagnostics",
     "ConstraintPlugin",
     "DailyGrossNotionalLimit",
     "DailyNetNotionalLimit",
@@ -81,5 +86,10 @@ __all__ = [
     "days_to_next_event",
     "default_constraints",
     "default_earnings_aware_config",
+    "diagnose_infeasible_problem",
+    "elastic_feasibility_report",
+    "format_infeasibility_diagnosis",
+    "get_constraint_diagnostics",
     "normalize_orders",
+    "with_diagnostics",
 ]
