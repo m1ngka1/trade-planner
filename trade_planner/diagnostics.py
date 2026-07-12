@@ -1,7 +1,8 @@
-"""Generic, read-only diagnostics for CVXPY problem objects."""
+"""Generic diagnostics and recovery checks for CVXPY problem objects."""
 
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict
 import math
 from typing import Any, Mapping
@@ -16,24 +17,49 @@ def diagnose_problem(
     problem: cp.Problem,
     *,
     solve_if_needed: bool = False,
+    verify_bottlenecks: bool = True,
+    max_verification_checks: int | None = None,
     solver: Any | None = None,
     solve_kwargs: Mapping[str, Any] | None = None,
     tol: float = 1e-7,
     top_k: int = 10,
 ) -> dict[str, Any]:
-    """Inspect every original constraint without constructing another model.
+    """Inspect every original constraint and verify single-constraint recovery.
 
-    By default this function is read-only. ``solve_if_needed=True`` explicitly
-    permits solving the original problem once; no constraints are removed,
-    relaxed, or replaced.
+    The original object is never mutated. For an infeasible problem, isolated
+    copies are solved with one constraint omitted at a time; no multi-constraint
+    slack or synthetic relaxation model is constructed. Set
+    ``verify_bottlenecks=False`` to skip these counterfactual checks.
+    ``solve_if_needed=True`` permits solving an unsolved original problem once.
     """
     initial_status = problem.status
     solve_error = _solve_original(problem, solver, solve_kwargs) if initial_status is None and solve_if_needed else None
     status_family = _status_family(problem.status)
     constraints = [_inspect_constraint(i, constraint, tol) for i, constraint in enumerate(problem.constraints)]
     solver_evidence = _solver_evidence(problem, constraints, tol)
-    bottlenecks = _rank_evidenced_constraints(constraints, solver_evidence, status_family, tol, top_k)
-    coverage = _coverage(constraints, bottlenecks)
+    candidates = _rank_evidenced_constraints(
+        constraints,
+        solver_evidence,
+        status_family,
+        tol,
+        len(constraints),
+    )
+    verification = _empty_verification()
+    bottlenecks = candidates[:top_k]
+    if verify_bottlenecks and status_family in {"infeasible", "infeasible_inaccurate"}:
+        verified, verification = _verify_single_constraint_recoveries(
+            problem,
+            constraints,
+            candidates,
+            solver,
+            solve_kwargs,
+            max_verification_checks,
+        )
+        if verified:
+            bottlenecks = verified[:top_k]
+        elif verification.get("complete"):
+            bottlenecks = []
+    coverage = _coverage(constraints, bottlenecks, verification)
 
     report: dict[str, Any] = {
         "summary": {
@@ -45,15 +71,16 @@ def diagnose_problem(
             "num_variables": len(problem.variables()),
             "was_solved_by_diagnostic": initial_status is None and problem.status is not None,
             "solve_error": solve_error,
-            "message": _summary_message(status_family, bottlenecks, solver_evidence),
+            "message": _summary_message(status_family, bottlenecks, solver_evidence, verification),
         },
         "coverage": coverage,
         "constraints": constraints,
         "variables": [_inspect_variable(variable) for variable in problem.variables()],
         "bottlenecks": bottlenecks,
+        "verification": verification,
         "solver_stats": _solver_stats(problem),
         "solver_evidence": solver_evidence,
-        "recommendations": _recommendations(status_family, bottlenecks, solver_evidence),
+        "recommendations": _recommendations(status_family, bottlenecks, solver_evidence, verification),
     }
     report["text"] = format_diagnosis(report, top_k=top_k)
     return report
@@ -92,6 +119,16 @@ def format_diagnosis(report: Mapping[str, Any], *, top_k: int = 10) -> str:
             )
             if diagnostics.get("potential_cause"):
                 lines.append(f"     Interpretation: {diagnostics.get('potential_cause')}")
+            verification = dict(row.get("verification", {}) or {})
+            if verification.get("restores_feasibility"):
+                witness = (verification.get("witness_violation") or {}).get("max_abs")
+                units = f" {diagnostics.get('units')}" if diagnostics.get("units") else ""
+                location = _format_location(verification.get("witness_location"))
+                lines.append(
+                    f"     Verified: omitting only this constraint solved the remaining model "
+                    f"({verification.get('status_without_constraint')}); "
+                    f"feasible-witness violation={_fmt_float(witness)}{units}{location}."
+                )
 
     if recommendations:
         lines.extend(["", "Recommendations:"])
@@ -165,6 +202,20 @@ def _constraint_violation(constraint: cp.Constraint) -> dict[str, Any] | None:
         return None
 
 
+def _constraint_witness_violation(constraint: cp.Constraint) -> dict[str, Any] | None:
+    """Return elementwise witness violations where the constraint API allows it."""
+    constraint_type = type(constraint).__name__
+    if constraint_type in {"Inequality", "Equality"}:
+        try:
+            value = np.asarray(constraint.expr.value, dtype=float)
+        except (AttributeError, TypeError, ValueError):
+            value = None
+        if value is not None:
+            residual = np.maximum(value, 0.0) if constraint_type == "Inequality" else np.abs(value)
+            return _array_summary(residual)
+    return _constraint_violation(constraint)
+
+
 def _constraint_slack(constraint: cp.Constraint, tol: float) -> tuple[dict[str, Any] | None, bool | None]:
     constraint_type = type(constraint).__name__
     if constraint_type not in {"Inequality", "Equality"}:
@@ -232,6 +283,133 @@ def _bottleneck_row(row: Mapping[str, Any], source: str, severity: float) -> dic
     }
 
 
+def _empty_verification() -> dict[str, Any]:
+    return {
+        "performed": False,
+        "complete": False,
+        "checked": 0,
+        "solve_errors": 0,
+        "single_constraint_recoveries": 0,
+    }
+
+
+def _verify_single_constraint_recoveries(
+    problem: cp.Problem,
+    constraints: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    solver: Any | None,
+    solve_kwargs: Mapping[str, Any] | None,
+    max_checks: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Prove whether omitting one original constraint restores an optimum."""
+    candidate_by_index = {int(row["cvxpy_index"]): row for row in candidates}
+    ordered_indices = list(candidate_by_index)
+    ordered_indices.extend(index for index in range(len(constraints)) if index not in candidate_by_index)
+    if max_checks is not None:
+        ordered_indices = ordered_indices[: max(0, max_checks)]
+
+    recovered: list[dict[str, Any]] = []
+    solve_errors = 0
+    solver_to_use = _verification_solver(problem, solver)
+    for index in ordered_indices:
+        try:
+            cloned = _clone_problem(problem)
+            removed = cloned.constraints[index]
+            remaining = [constraint for i, constraint in enumerate(cloned.constraints) if i != index]
+            counterfactual = cp.Problem(cloned.objective, remaining)
+            _solve_counterfactual(counterfactual, solver_to_use, solve_kwargs)
+        except Exception:
+            solve_errors += 1
+            continue
+
+        if _status_family(counterfactual.status) not in {"solved", "solved_inaccurate"}:
+            continue
+        row = dict(
+            candidate_by_index.get(index)
+            or _bottleneck_row(constraints[index], "no_prior_numeric_evidence", 0.0)
+        )
+        row["evidence_source"] = row["source"]
+        row["source"] = "single_constraint_recovery"
+        row["verification"] = {
+            "method": "single_constraint_omission",
+            "restores_feasibility": True,
+            "status_without_constraint": counterfactual.status,
+            "solver": solver_to_use,
+            "witness_violation": _constraint_witness_violation(removed),
+        }
+        row["verification"]["witness_location"] = _witness_location(
+            row["verification"]["witness_violation"],
+            row.get("diagnostics") or {},
+        )
+        recovered.append(row)
+
+    recovered.sort(
+        key=lambda row: (
+            bool((row.get("diagnostics") or {}).get("hard", True)),
+            -float(row.get("severity", 0.0)),
+        )
+    )
+    for rank, row in enumerate(recovered, start=1):
+        row["rank"] = rank
+    return recovered, {
+        "performed": True,
+        "complete": len(ordered_indices) == len(constraints) and solve_errors == 0,
+        "checked": len(ordered_indices),
+        "solve_errors": solve_errors,
+        "single_constraint_recoveries": len(recovered),
+    }
+
+
+def _clone_problem(problem: cp.Problem) -> cp.Problem:
+    """Clone an expression tree with fresh leaves and no shared solve state."""
+    replacements: dict[int, Any] = {}
+    for variable in problem.variables():
+        replacements[id(variable)] = cp.Variable(
+            variable.shape,
+            name=variable.name(),
+            **_leaf_attributes(variable.attributes),
+        )
+    for parameter in problem.parameters():
+        replacements[id(parameter)] = cp.Parameter(
+            parameter.shape,
+            name=parameter.name(),
+            value=copy.deepcopy(parameter.value),
+            **_leaf_attributes(parameter.attributes),
+        )
+    objective = problem.objective.tree_copy(replacements)
+    constraints = [constraint.tree_copy(replacements) for constraint in problem.constraints]
+    return cp.Problem(objective, constraints)
+
+
+def _leaf_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in attributes.items()
+        if _meaningful_attribute(value)
+    }
+
+
+def _verification_solver(problem: cp.Problem, solver: Any | None) -> Any | None:
+    if solver is not None:
+        return solver
+    stats = getattr(problem, "solver_stats", None)
+    original_solver = getattr(stats, "solver_name", None) if stats is not None else None
+    return original_solver if original_solver in cp.installed_solvers() else None
+
+
+def _solve_counterfactual(
+    problem: cp.Problem,
+    solver: Any | None,
+    solve_kwargs: Mapping[str, Any] | None,
+) -> None:
+    kwargs = dict(solve_kwargs or {})
+    kwargs.pop("solver", None)
+    if solver is None:
+        problem.solve(**kwargs)
+    else:
+        problem.solve(solver=solver, **kwargs)
+
+
 def _solver_evidence(
     problem: cp.Problem,
     constraints: list[dict[str, Any]],
@@ -285,13 +463,18 @@ def _solver_evidence(
     }
 
 
-def _coverage(constraints: list[dict[str, Any]], bottlenecks: list[dict[str, Any]]) -> dict[str, Any]:
+def _coverage(
+    constraints: list[dict[str, Any]],
+    bottlenecks: list[dict[str, Any]],
+    verification: Mapping[str, Any],
+) -> dict[str, Any]:
     return {
         "inspected": len(constraints),
         "with_metadata": sum(bool(row["diagnostics_attached"]) for row in constraints),
         "with_primal_metrics": sum(row["violation"] is not None for row in constraints),
         "with_dual_values": sum(row["dual"] is not None for row in constraints),
         "evidence_backed_bottlenecks": len(bottlenecks),
+        "verified_single_constraint_recoveries": int(verification.get("single_constraint_recoveries", 0)),
         "unresolved": not bool(bottlenecks),
     }
 
@@ -300,16 +483,23 @@ def _recommendations(
     status_family: str,
     bottlenecks: list[dict[str, Any]],
     solver_evidence: Mapping[str, Any],
+    verification: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     if bottlenecks:
         return [
             {
                 "title": f"Inspect {(row.get('diagnostics') or {}).get('name')}",
-                "detail": (row.get("diagnostics") or {}).get("potential_cause") or f"Evidence source: {row.get('source')}.",
+                "detail": _recommendation_detail(row),
                 "action": (row.get("diagnostics") or {}).get("suggested_relaxation"),
             }
             for row in bottlenecks
         ]
+    if verification.get("performed") and verification.get("complete"):
+        return [{
+            "title": "No single-constraint recovery",
+            "detail": "Removing each original constraint individually failed to restore an optimum.",
+            "action": "Treat this as a multi-constraint conflict; do not promise that relaxing one constraint will solve it.",
+        }]
     if status_family in {"infeasible", "infeasible_inaccurate"}:
         return [{
             "title": "No original-constraint mapping available",
@@ -341,7 +531,13 @@ def _summary_message(
     status_family: str,
     bottlenecks: list[dict[str, Any]],
     solver_evidence: Mapping[str, Any],
+    verification: Mapping[str, Any],
 ) -> str:
+    recoveries = int(verification.get("single_constraint_recoveries", 0))
+    if recoveries:
+        return f"Verified {recoveries} constraint(s) whose individual removal restores an optimal solution."
+    if verification.get("performed") and verification.get("complete"):
+        return "No single original constraint can be removed to restore an optimal solution; the conflict requires multiple changes."
     if bottlenecks:
         return f"The original problem exposes evidence for {len(bottlenecks)} limiting constraint(s)."
     if status_family in {"infeasible", "infeasible_inaccurate"}:
@@ -357,6 +553,22 @@ def _summary_message(
     if status_family == "not_solved":
         return "The original problem has not been solved; all constraints were inventoried without mutation."
     return str(solver_evidence.get("note") or "The problem status is uncertain.")
+
+
+def _recommendation_detail(row: Mapping[str, Any]) -> str:
+    verification = dict(row.get("verification", {}) or {})
+    if verification.get("restores_feasibility"):
+        witness = (verification.get("witness_violation") or {}).get("max_abs")
+        diagnostics = dict(row.get("diagnostics", {}) or {})
+        units = f" {diagnostics.get('units')}" if diagnostics.get("units") else ""
+        location = _format_location(verification.get("witness_location"))
+        return (
+            f"Omitting only this constraint made every remaining original constraint solvable "
+            f"with status {verification.get('status_without_constraint')}; "
+            f"the feasible witness violates it by at most {_fmt_float(witness)}{units}{location}."
+        )
+    diagnostics = dict(row.get("diagnostics", {}) or {})
+    return diagnostics.get("potential_cause") or f"Evidence source: {row.get('source')}."
 
 
 def _solver_stats(problem: cp.Problem) -> dict[str, Any] | None:
@@ -399,17 +611,57 @@ def _diagnostics_dict(diagnostics: ConstraintDiagnostics) -> dict[str, Any]:
 
 
 def _array_summary(value: Any) -> dict[str, Any] | None:
+    shaped = None
+    if not isinstance(value, (list, tuple)):
+        try:
+            shaped = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            shaped = None
     array = _numeric_array(value)
     if array is None or not array.size:
         return None
     finite = array[np.isfinite(array)]
     if not finite.size:
         return None
-    return {
+    summary = {
         "max_abs": float(np.max(np.abs(finite))),
         "l2_norm": float(np.linalg.norm(finite)),
         "sample": _json_safe(array[:20]),
     }
+    if shaped is not None and shaped.size and np.any(np.isfinite(shaped)):
+        finite_abs = np.where(np.isfinite(shaped), np.abs(shaped), -np.inf)
+        flat_index = int(np.argmax(finite_abs))
+        summary["shape"] = list(shaped.shape)
+        summary["max_index"] = [int(index) for index in np.unravel_index(flat_index, shaped.shape)] if shaped.shape else []
+    return summary
+
+
+def _witness_location(witness: Mapping[str, Any] | None, diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    if not witness or witness.get("max_index") is None:
+        return {}
+    indices = list(witness.get("max_index") or [])
+    if not indices:
+        return {}
+    location: dict[str, Any] = {"index": indices}
+    axes = list((diagnostics.get("axis_labels") or {}).items())
+    if len(axes) == len(indices):
+        for (axis, labels), index in zip(axes, indices):
+            if index < len(labels):
+                location[str(axis)] = labels[index]
+    for key in ("date", "symbol", "factor"):
+        details = diagnostics.get("details") or {}
+        if key in details and key not in location:
+            location[key] = details[key]
+    return location
+
+
+def _format_location(location: Any) -> str:
+    if not isinstance(location, Mapping) or not location:
+        return ""
+    parts = [f"{key}={value}" for key, value in location.items() if key != "index"]
+    if not parts and "index" in location:
+        parts = [f"index={location['index']}"]
+    return " at " + ", ".join(parts) if parts else ""
 
 
 def _numeric_array(value: Any) -> np.ndarray | None:

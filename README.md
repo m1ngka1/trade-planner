@@ -120,14 +120,35 @@ variables, parameters, domain metadata, dual value, residual, and slack when
 CVXPY exposes those values. `coverage` states exactly how many constraints had
 primal metrics, dual values, and attached metadata.
 
-The function never removes, replaces, or relaxes constraints. An unsolved
-problem is not solved implicitly; opt in to solving the same original object
-with `diagnose_problem(problem, solve_if_needed=True)`. The older
-`diagnose_infeasible_problem` name remains as an alias.
+The original object is never mutated and the diagnostic does not create a model
+with many artificial slacks. For an infeasible solve it verifies each candidate
+on an isolated copy with only that one constraint omitted. A reported
+`single_constraint_recovery` therefore means the remaining original objective
+and constraints reached an optimum; `witness_violation` records how far the
+feasible witness lies outside the omitted constraint. If no individual omission
+works, the report says the conflict requires multiple changes.
+
+An unsolved problem is not solved implicitly; opt in to solving the same
+original object with `diagnose_problem(problem, solve_if_needed=True)`. Set
+`verify_bottlenecks=False` when only a fast evidence snapshot is wanted. The
+optional `max_verification_checks` bounds counterfactual solves for very large
+models. The older `diagnose_infeasible_problem` name remains as an alias.
+
+`TradePlanner` keeps its automatic failure report fast and attaches the original
+problem to `InfeasiblePlanError`, so a PM-facing workflow can request verified
+recovery explicitly:
+
+```python
+try:
+    result = planner.solve(ctx)
+except InfeasiblePlanError as error:
+    verified = diagnose_problem(error.problem)
+    print(verified["text"])
+```
 
 CVXPY exposes statuses, dual values, constraint residuals, and solver-specific
 `solver_stats`, but infeasible solves generally do not populate primal variable
-values. A constraint is ranked only when the original object provides evidence:
+values. Candidates are prioritized only when the original object provides evidence:
 a nonzero residual, an active shadow price, an infeasibility dual stored on the
 original constraint, or a solver certificate mapped to its CVXPY constraint id.
 If an infeasible solver result exposes only an unmapped raw

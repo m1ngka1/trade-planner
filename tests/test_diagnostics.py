@@ -172,17 +172,89 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
         problem = cp.Problem(cp.Minimize(0), constraints)
         problem.solve(solver=_solver())
         original_ids = [constraint.id for constraint in problem.constraints]
+        original_status = problem.status
+        original_duals = [constraint.dual_value for constraint in problem.constraints]
 
         report = diagnose_infeasible_problem(problem)
         text = format_infeasibility_diagnosis(report)
 
         self.assertEqual([constraint.id for constraint in problem.constraints], original_ids)
+        self.assertEqual(problem.status, original_status)
+        np.testing.assert_allclose(
+            [constraint.dual_value for constraint in problem.constraints],
+            original_duals,
+        )
         self.assertEqual(report["coverage"]["inspected"], len(problem.constraints))
         self.assertIn("minimum_x", {row["diagnostics"]["name"] for row in report["constraints"]})
         self.assertIn("maximum_x", {row["diagnostics"]["name"] for row in report["constraints"]})
         self.assertNotIn("elastic", report)
-        self.assertEqual({row["source"] for row in report["bottlenecks"]}, {"infeasibility_dual"})
+        self.assertEqual({row["source"] for row in report["bottlenecks"]}, {"single_constraint_recovery"})
+        self.assertEqual(report["verification"]["single_constraint_recoveries"], 2)
+        self.assertTrue(all(row["verification"]["restores_feasibility"] for row in report["bottlenecks"]))
         self.assertIn("evidence-backed bottlenecks", text.lower())
+
+        for removed_index in (0, 1):
+            check_x = cp.Variable(name=f"check_x_{removed_index}")
+            check_constraints = [check_x >= 10, check_x <= 7]
+            check = cp.Problem(
+                cp.Minimize(0),
+                [constraint for index, constraint in enumerate(check_constraints) if index != removed_index],
+            )
+            check.solve(solver=_solver())
+            self.assertIn(check.status, {"optimal", "optimal_inaccurate"})
+
+        for row in report["bottlenecks"]:
+            amount = row["verification"]["witness_violation"]["max_abs"] + 1e-7
+            relaxed_x = cp.Variable(name=f"relaxed_x_{row['cvxpy_index']}")
+            relaxed_constraints = (
+                [relaxed_x >= 10 - amount, relaxed_x <= 7]
+                if row["cvxpy_index"] == 0
+                else [relaxed_x >= 10, relaxed_x <= 7 + amount]
+            )
+            relaxed = cp.Problem(cp.Minimize(0), relaxed_constraints)
+            relaxed.solve(solver=_solver())
+            self.assertIn(relaxed.status, {"optimal", "optimal_inaccurate"})
+
+    def test_reports_when_one_constraint_change_cannot_restore_feasibility(self) -> None:
+        x = cp.Variable(name="x")
+        y = cp.Variable(name="y")
+        problem = cp.Problem(cp.Minimize(0), [x >= 1, x <= 0, y >= 1, y <= 0])
+        problem.solve(solver=_solver())
+
+        report = diagnose_problem(problem)
+
+        self.assertTrue(report["verification"]["complete"])
+        self.assertEqual(report["verification"]["single_constraint_recoveries"], 0)
+        self.assertEqual(report["bottlenecks"], [])
+        self.assertIn("requires multiple changes", report["summary"]["message"])
+        self.assertEqual(report["recommendations"][0]["title"], "No single-constraint recovery")
+
+    def test_verified_vector_bottleneck_identifies_labeled_element(self) -> None:
+        x = cp.Variable(2, name="positions")
+        lower = with_diagnostics(
+            x >= np.array([10.0, 0.0]),
+            ConstraintDiagnostics(
+                name="required_positions",
+                axis_labels={"symbol": ("AAA", "BBB")},
+                units="shares",
+            ),
+        )
+        upper = with_diagnostics(
+            x <= np.array([7.0, 100.0]),
+            ConstraintDiagnostics(
+                name="position_caps",
+                axis_labels={"symbol": ("AAA", "BBB")},
+                units="shares",
+            ),
+        )
+        problem = cp.Problem(cp.Minimize(0), [lower, upper])
+        problem.solve(solver=_solver())
+
+        report = diagnose_problem(problem)
+        cap_row = next(row for row in report["bottlenecks"] if row["diagnostics"]["name"] == "position_caps")
+
+        self.assertEqual(cap_row["verification"]["witness_location"]["symbol"], "AAA")
+        self.assertGreaterEqual(cap_row["verification"]["witness_violation"]["max_abs"], 3.0 - 1e-6)
 
     def test_generic_constraint_types_are_all_inventoried(self) -> None:
         x = cp.Variable(2, name="x")
@@ -230,11 +302,16 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
 
         diagnostics = raised.exception.diagnostics
         self.assertIsNotNone(diagnostics)
+        self.assertIsNotNone(raised.exception.problem)
         groups = {row["diagnostics"]["group"] for row in diagnostics["constraints"]}
         self.assertIn("capacity", groups)
         self.assertIn("completion", groups)
         self.assertEqual(diagnostics["coverage"]["inspected"], diagnostics["summary"]["num_constraints"])
         self.assertNotIn("elastic", diagnostics)
+
+        verified = diagnose_problem(raised.exception.problem, solver=_solver())
+        self.assertGreater(verified["verification"]["single_constraint_recoveries"], 0)
+        self.assertTrue(all(row["source"] == "single_constraint_recovery" for row in verified["bottlenecks"]))
 
     def test_factor_exposure_constraints_are_inspected_without_special_case_logic(self) -> None:
         ctx = _context(targets=[100.0, 0.0], base_participation=0.5)
