@@ -1,4 +1,4 @@
-"""CVXPY infeasibility diagnostics for trade-planner constraints."""
+"""Generic, read-only diagnostics for CVXPY problem objects."""
 
 from __future__ import annotations
 
@@ -12,394 +12,354 @@ import numpy as np
 from .constraints import ConstraintDiagnostics, get_constraint_diagnostics
 
 
-def diagnose_infeasible_problem(
+def diagnose_problem(
     problem: cp.Problem,
     *,
-    run_elastic: bool = False,
-    solver: Any | None = None,
     solve_if_needed: bool = False,
+    solver: Any | None = None,
     solve_kwargs: Mapping[str, Any] | None = None,
     tol: float = 1e-7,
     top_k: int = 10,
 ) -> dict[str, Any]:
-    """Inspect a CVXPY problem and return user-facing bottleneck diagnostics.
+    """Inspect every original constraint without constructing another model.
 
-    The function is post-solve by default.  Set ``solve_if_needed=True`` to
-    explicitly solve an unsolved problem before inspection.
+    By default this function is read-only. ``solve_if_needed=True`` explicitly
+    permits solving the original problem once; no constraints are removed,
+    relaxed, or replaced.
     """
-    initial_status = getattr(problem, "status", None)
-    solve_error = None
-    if initial_status is None and solve_if_needed:
-        try:
-            kwargs = dict(solve_kwargs or {})
-            if solver is None:
-                problem.solve(**kwargs)
-            else:
-                problem.solve(solver=solver, **kwargs)
-        except Exception as exc:
-            solve_error = repr(exc)
+    initial_status = problem.status
+    solve_error = _solve_original(problem, solver, solve_kwargs) if initial_status is None and solve_if_needed else None
+    status_family = _status_family(problem.status)
+    constraints = [_inspect_constraint(i, constraint, tol) for i, constraint in enumerate(problem.constraints)]
+    solver_evidence = _solver_evidence(problem, constraints, tol)
+    bottlenecks = _rank_evidenced_constraints(constraints, solver_evidence, status_family, tol, top_k)
+    coverage = _coverage(constraints, bottlenecks)
 
-    status = getattr(problem, "status", None)
-    status_family = _status_family(status)
-    constraints = [_constraint_row(i, c, tol=tol) for i, c in enumerate(problem.constraints)]
-    solver_evidence = _solver_constraint_evidence(problem, tol=tol, top_k=top_k)
-
-    elastic = None
-    if run_elastic and status_family in {"infeasible", "infeasible_inaccurate"}:
-        elastic = elastic_feasibility_report(problem, solver=solver, tol=tol, top_k=top_k)
-
-    bottlenecks = _rank_bottlenecks(constraints, elastic, top_k=top_k)
     report: dict[str, Any] = {
         "summary": {
-            "status": status,
+            "status": problem.status,
             "status_family": status_family,
-            "was_solved_by_diagnostic": initial_status is None and status is not None,
-            "solve_error": solve_error,
-            "value": _finite_or_str(getattr(problem, "value", None)),
+            "value": _finite_or_str(problem.value),
             "is_dcp": problem.is_dcp(),
             "num_constraints": len(problem.constraints),
             "num_variables": len(problem.variables()),
-            "message": _summary_message(status_family, elastic),
+            "was_solved_by_diagnostic": initial_status is None and problem.status is not None,
+            "solve_error": solve_error,
+            "message": _summary_message(status_family, bottlenecks, solver_evidence),
         },
+        "coverage": coverage,
         "constraints": constraints,
+        "variables": [_inspect_variable(variable) for variable in problem.variables()],
         "bottlenecks": bottlenecks,
-        "solver_stats": _solver_stats_row(problem),
+        "solver_stats": _solver_stats(problem),
         "solver_evidence": solver_evidence,
-        "elastic": elastic,
-        "recommendations": _recommendations(status_family, elastic, solver_evidence, bottlenecks, top_k),
+        "recommendations": _recommendations(status_family, bottlenecks, solver_evidence),
     }
-    report["text"] = format_infeasibility_diagnosis(report, top_k=top_k)
+    report["text"] = format_diagnosis(report, top_k=top_k)
     return report
 
 
-def elastic_feasibility_report(
-    problem: cp.Problem,
-    *,
-    solver: Any | None = None,
-    tol: float = 1e-7,
-    top_k: int = 10,
-    penalize_by_size: bool = False,
-) -> dict[str, Any]:
-    """Solve a relaxed feasibility model and rank required constraint slacks."""
-    relaxed_constraints: list[cp.Constraint] = []
-    penalties: list[cp.Expression] = []
-    slack_records: list[dict[str, Any]] = []
-    unsupported: list[dict[str, Any]] = []
-
-    for index, constraint in enumerate(problem.constraints):
-        expr = getattr(constraint, "expr", None)
-        diagnostics = _diagnostics_or_default(index, constraint)
-        constraint_type = type(constraint).__name__
-
-        if expr is None:
-            relaxed_constraints.append(constraint)
-            unsupported.append(_unsupported_row(index, constraint, diagnostics, "constraint has no expression"))
-            continue
-
-        if constraint_type == "Inequality":
-            slack = cp.Variable(expr.shape, nonneg=True, name=f"slack__{_safe_name(diagnostics.name)}")
-            relaxed_constraints.append(expr <= slack)
-            penalties.append(float(diagnostics.weight) * _penalty(slack, expr.shape, penalize_by_size))
-            slack_records.append(
-                {
-                    "index": index,
-                    "constraint": constraint,
-                    "diagnostics": diagnostics,
-                    "slack": slack,
-                    "kind": "inequality",
-                    "shape": tuple(expr.shape),
-                }
-            )
-        elif constraint_type == "Equality":
-            slack = cp.Variable(expr.shape, nonneg=True, name=f"slack__{_safe_name(diagnostics.name)}")
-            relaxed_constraints.extend([expr <= slack, -expr <= slack])
-            penalties.append(float(diagnostics.weight) * _penalty(slack, expr.shape, penalize_by_size))
-            slack_records.append(
-                {
-                    "index": index,
-                    "constraint": constraint,
-                    "diagnostics": diagnostics,
-                    "slack": slack,
-                    "kind": "equality",
-                    "shape": tuple(expr.shape),
-                }
-            )
-        else:
-            relaxed_constraints.append(constraint)
-            unsupported.append(
-                _unsupported_row(index, constraint, diagnostics, "only Equality and Inequality constraints are relaxed")
-            )
-
-    if not penalties:
-        return {
-            "status": "not_run",
-            "solver": None,
-            "objective": None,
-            "violations": [],
-            "unsupported_constraints": unsupported,
-            "solve_error": "no relaxable equality or inequality constraints were found",
-        }
-
-    relaxed_problem = cp.Problem(cp.Minimize(sum(penalties)), relaxed_constraints)
-    solver_used, solve_error = _solve_relaxed_problem(relaxed_problem, solver)
-
-    violations: list[dict[str, Any]] = []
-    if solve_error is None:
-        for record in slack_records:
-            slack_value = record["slack"].value
-            if slack_value is None:
-                continue
-
-            slack_array = np.asarray(slack_value, dtype=float)
-            finite = np.isfinite(slack_array)
-            if not np.any(finite):
-                continue
-
-            max_relaxation = float(np.max(slack_array[finite]))
-            if max_relaxation <= tol:
-                continue
-
-            total_relaxation = float(np.sum(slack_array[finite]))
-            mean_relaxation = float(np.mean(slack_array[finite]))
-            max_flat_index = int(np.nanargmax(slack_array))
-            diagnostics: ConstraintDiagnostics = record["diagnostics"]
-
-            row = {
-                "cvxpy_index": record["index"],
-                "constraint_type": type(record["constraint"]).__name__,
-                "kind": record["kind"],
-                "shape": record["shape"],
-                "max_relaxation": max_relaxation,
-                "total_relaxation": total_relaxation,
-                "mean_relaxation": mean_relaxation,
-                "weighted_max_relaxation": float(diagnostics.weight) * max_relaxation,
-                "weighted_total_relaxation": float(diagnostics.weight) * total_relaxation,
-                "max_location": _slack_location(slack_array.shape, max_flat_index, diagnostics),
-                "slack_sample": slack_array.ravel()[:20].tolist(),
-                "diagnostics": _diagnostics_dict(diagnostics),
-                "constraint": _short_str(record["constraint"], 400),
-            }
-            row["recommendation"] = _relaxation_recommendation(row)
-            violations.append(row)
-
-    violations.sort(
-        key=lambda r: (r["weighted_total_relaxation"], r["weighted_max_relaxation"]),
-        reverse=True,
-    )
-
-    return {
-        "status": getattr(relaxed_problem, "status", None) if solve_error is None else "solve_error",
-        "solver": solver_used,
-        "objective": _finite_or_str(getattr(relaxed_problem, "value", None)) if solve_error is None else None,
-        "violations": violations[:top_k],
-        "unsupported_constraints": unsupported,
-        "solve_error": solve_error,
-    }
+# Backward-compatible name; the implementation is no longer infeasibility-only.
+diagnose_infeasible_problem = diagnose_problem
 
 
-def format_infeasibility_diagnosis(report: Mapping[str, Any], *, top_k: int = 10) -> str:
-    """Format a diagnostic report into a concise text explanation."""
+def format_diagnosis(report: Mapping[str, Any], *, top_k: int = 10) -> str:
+    """Render a concise, evidence-qualified model diagnosis."""
     summary = dict(report.get("summary", {}) or {})
-    elastic = report.get("elastic")
+    coverage = dict(report.get("coverage", {}) or {})
     bottlenecks = list(report.get("bottlenecks", []) or [])
     recommendations = list(report.get("recommendations", []) or [])
 
-    lines: list[str] = []
-    lines.append("=== CVXPY infeasibility diagnosis ===")
-    lines.append(f"Status: {summary.get('status')} ({summary.get('status_family')})")
-    lines.append(str(summary.get("message") or "No status message was generated."))
-    lines.append("")
+    lines = [
+        "=== CVXPY model diagnosis ===",
+        f"Status: {summary.get('status')} ({summary.get('status_family')})",
+        str(summary.get("message") or "No status message was generated."),
+        (
+            f"Inspected {coverage.get('inspected', 0)}/{summary.get('num_constraints', 0)} constraints; "
+            f"metadata={coverage.get('with_metadata', 0)}, primal metrics={coverage.get('with_primal_metrics', 0)}, "
+            f"dual values={coverage.get('with_dual_values', 0)}."
+        ),
+    ]
 
-    if isinstance(elastic, Mapping):
-        if elastic.get("solve_error"):
-            lines.append(f"Elastic relaxation failed: {elastic.get('solve_error')}")
-            lines.append("")
-        else:
-            lines.append(
-                "Elastic relaxation: "
-                f"status={elastic.get('status')}, solver={elastic.get('solver')}, "
-                f"minimum weighted slack={_fmt_float(elastic.get('objective'))}"
-            )
-            violations = list(elastic.get("violations", []) or [])
-            if violations:
-                lines.append("Likely infeasible constraints and relaxation suggestions:")
-                for rank, row in enumerate(violations[:top_k], start=1):
-                    diagnostics = dict(row.get("diagnostics", {}) or {})
-                    units = f" {diagnostics.get('units')}" if diagnostics.get("units") else ""
-                    location = _format_location(row.get("max_location"))
-                    lines.append(
-                        f"  {rank}. {diagnostics.get('name')} "
-                        f"[{diagnostics.get('group') or 'ungrouped'}]: "
-                        f"max slack {_fmt_float(row.get('max_relaxation'))}{units}{location}"
-                    )
-                    if diagnostics.get("potential_cause"):
-                        lines.append(f"     Potential cause: {diagnostics.get('potential_cause')}")
-                    if row.get("recommendation"):
-                        lines.append(f"     Suggested relaxation: {row.get('recommendation')}")
-            else:
-                lines.append("No positive slack was required in relaxable constraints.")
-            lines.append("")
-
-    if not isinstance(elastic, Mapping) and bottlenecks:
-        lines.append("Original-model bottlenecks ranked by structural evidence, shadow price, or residual:")
+    if bottlenecks:
+        lines.extend(["", "Evidence-backed bottlenecks:"])
         for row in bottlenecks[:top_k]:
             diagnostics = dict(row.get("diagnostics", {}) or {})
             lines.append(
                 f"  {row.get('rank')}. {diagnostics.get('name')} "
                 f"[{diagnostics.get('group') or 'ungrouped'}]: "
-                f"severity={_fmt_float(row.get('severity'))} ({row.get('source')})"
+                f"{row.get('source')}={_fmt_float(row.get('severity'))}"
             )
             if diagnostics.get("potential_cause"):
                 lines.append(f"     Interpretation: {diagnostics.get('potential_cause')}")
-            evidence = list(row.get("evidence", []) or [])
-            if evidence and evidence[0].get("message"):
-                lines.append(f"     Evidence: {evidence[0].get('message')}")
-        lines.append("")
 
     if recommendations:
-        lines.append("Recommendations:")
+        lines.extend(["", "Recommendations:"])
         for item in recommendations[:top_k]:
             lines.append(f"  - {item.get('title')}: {item.get('detail')}")
             if item.get("action"):
                 lines.append(f"    Action: {item.get('action')}")
-
     return "\n".join(lines)
 
 
-def _constraint_row(index: int, constraint: cp.Constraint, *, tol: float) -> dict[str, Any]:
-    diagnostics = _diagnostics_or_default(index, constraint)
-    row = {
+format_infeasibility_diagnosis = format_diagnosis
+
+
+def _inspect_constraint(index: int, constraint: cp.Constraint, tol: float) -> dict[str, Any]:
+    attached = get_constraint_diagnostics(constraint)
+    diagnostics = attached or _default_diagnostics(index, constraint)
+    dual = _array_summary(getattr(constraint, "dual_value", None))
+    violation = _constraint_violation(constraint)
+    slack, active = _constraint_slack(constraint, tol)
+    has_primal = violation is not None
+
+    if violation and violation.get("max_abs", 0.0) > tol:
+        state = "violated"
+    elif active is True:
+        state = "active"
+    elif has_primal:
+        state = "satisfied"
+    else:
+        state = "unavailable"
+
+    return {
         "cvxpy_index": index,
         "constraint_id": getattr(constraint, "id", None),
         "constraint_type": type(constraint).__name__,
         "shape": tuple(getattr(constraint, "shape", ())),
         "size": int(getattr(constraint, "size", 0)),
+        "is_dcp": _safe_bool_call(constraint, "is_dcp"),
+        "state": state,
+        "variables": [variable.name() for variable in constraint.variables()],
+        "parameters": [parameter.name() for parameter in constraint.parameters()],
+        "diagnostics_attached": attached is not None,
         "diagnostics": _diagnostics_dict(diagnostics),
-        "constraint": _short_str(constraint, 400),
-    }
-    row.update(_constraint_solution_metrics(constraint, tol=tol))
-    return row
-
-
-def _constraint_solution_metrics(constraint: cp.Constraint, *, tol: float) -> dict[str, Any]:
-    dual = _array_summary(getattr(constraint, "dual_value", None))
-    violation = None
-    try:
-        violation = _array_summary(constraint.violation())
-    except (ValueError, TypeError):
-        pass
-
-    slack = None
-    active = None
-    expr = getattr(constraint, "expr", None)
-    expr_value = getattr(expr, "value", None) if expr is not None else None
-    if expr_value is not None and type(constraint).__name__ == "Inequality":
-        values = np.asarray(expr_value, dtype=float)
-        slack_values = np.maximum(-values, 0.0)
-        slack = _array_summary(slack_values)
-        active = bool(np.min(slack_values) <= tol)
-    elif expr_value is not None and type(constraint).__name__ == "Equality":
-        active = True
-
-    return {
         "dual": dual,
         "violation": violation,
         "slack": slack,
         "is_active": active,
+        "constraint": _short_str(constraint, 400),
     }
 
 
-def _array_summary(value: Any) -> dict[str, Any] | None:
-    array = _numeric_array(value)
-    if array is None or array.size == 0:
-        return None
-    finite = array[np.isfinite(array)]
-    if finite.size == 0:
-        return {"max_abs": None, "l2_norm": None, "sample": array[:20].tolist()}
+def _inspect_variable(variable: cp.Variable) -> dict[str, Any]:
+    attributes = {
+        key: _json_safe(value)
+        for key, value in variable.attributes.items()
+        if _meaningful_attribute(value)
+    }
     return {
-        "max_abs": float(np.max(np.abs(finite))),
-        "l2_norm": float(np.linalg.norm(finite)),
-        "sample": array[:20].tolist(),
+        "variable_id": getattr(variable, "id", None),
+        "name": variable.name(),
+        "shape": tuple(variable.shape),
+        "size": int(variable.size),
+        "attributes": attributes,
+        "has_value": variable.value is not None,
     }
 
 
-def _rank_bottlenecks(
+def _constraint_violation(constraint: cp.Constraint) -> dict[str, Any] | None:
+    try:
+        return _array_summary(constraint.violation())
+    except (ValueError, TypeError, NotImplementedError):
+        return None
+
+
+def _constraint_slack(constraint: cp.Constraint, tol: float) -> tuple[dict[str, Any] | None, bool | None]:
+    constraint_type = type(constraint).__name__
+    if constraint_type not in {"Inequality", "Equality"}:
+        violation = _constraint_violation(constraint)
+        return None, bool(violation and violation.get("max_abs", math.inf) <= tol) if violation else None
+    try:
+        expr = constraint.expr
+    except (AttributeError, ValueError):
+        return None, None
+    value = getattr(expr, "value", None)
+    if value is None:
+        return None, None
+    if constraint_type == "Inequality":
+        slack_values = np.maximum(-np.asarray(value, dtype=float), 0.0)
+        return _array_summary(slack_values), bool(np.min(slack_values) <= tol)
+    return None, True
+
+
+def _rank_evidenced_constraints(
     constraints: list[dict[str, Any]],
-    elastic: Mapping[str, Any] | None,
-    *,
+    solver_evidence: Mapping[str, Any],
+    status_family: str,
+    tol: float,
     top_k: int,
 ) -> list[dict[str, Any]]:
-    if isinstance(elastic, Mapping) and elastic.get("violations"):
-        return [
-            {
-                "rank": rank,
-                "source": "elastic_relaxation",
-                "severity": row.get("weighted_total_relaxation"),
-                **row,
-            }
-            for rank, row in enumerate(list(elastic.get("violations", []))[:top_k], start=1)
-        ]
+    ranked: dict[int, dict[str, Any]] = {}
+    for evidence in solver_evidence.get("constraints", []) or []:
+        index = evidence.get("cvxpy_index")
+        if index is None:
+            continue
+        row = constraints[int(index)]
+        ranked[int(index)] = _bottleneck_row(
+            row,
+            "solver_certificate",
+            float(evidence.get("max_abs_certificate_entry", 0.0)),
+        )
 
-    groups = {
-        str((row.get("diagnostics") or {}).get("group"))
-        for row in constraints
-        if row.get("diagnostics")
-    }
-    ranked: list[dict[str, Any]] = []
     for row in constraints:
-        diagnostics = dict(row.get("diagnostics", {}) or {})
-        details = dict(diagnostics.get("details", {}) or {})
-        structural = list(details.get("structural_violations", []) or [])
-        required_groups = set(details.get("requires_constraint_groups", []) or [])
-        if details.get("requires_hard_completion"):
-            required_groups.add("completion")
-        if structural and required_groups.issubset(groups):
-            score = max(float(item.get("severity", 0.0)) for item in structural)
-            if score > 0:
-                ranked.append(
+        index = int(row["cvxpy_index"])
+        violation = (row.get("violation") or {}).get("max_abs")
+        dual = (row.get("dual") or {}).get("max_abs")
+        if violation is not None and float(violation) > tol:
+            ranked[index] = _bottleneck_row(row, "residual_violation", float(violation))
+        elif status_family in {"infeasible", "infeasible_inaccurate"} and dual is not None and float(dual) > tol:
+            ranked[index] = _bottleneck_row(row, "infeasibility_dual", float(dual))
+        elif index not in ranked and row.get("is_active") and dual is not None and float(dual) > tol:
+            ranked[index] = _bottleneck_row(row, "active_dual", float(dual))
+
+    result = sorted(ranked.values(), key=lambda item: item["severity"], reverse=True)[:top_k]
+    for rank, row in enumerate(result, start=1):
+        row["rank"] = rank
+    return result
+
+
+def _bottleneck_row(row: Mapping[str, Any], source: str, severity: float) -> dict[str, Any]:
+    return {
+        "cvxpy_index": row.get("cvxpy_index"),
+        "constraint_id": row.get("constraint_id"),
+        "source": source,
+        "severity": severity,
+        "diagnostics": row.get("diagnostics"),
+        "dual": row.get("dual"),
+        "violation": row.get("violation"),
+        "slack": row.get("slack"),
+    }
+
+
+def _solver_evidence(
+    problem: cp.Problem,
+    constraints: list[dict[str, Any]],
+    tol: float,
+) -> dict[str, Any]:
+    stats = getattr(problem, "solver_stats", None)
+    extra = getattr(stats, "extra_stats", None) if stats is not None else None
+    if extra is not None and not isinstance(extra, Mapping) and hasattr(extra, "__dict__"):
+        extra = vars(extra)
+    if not isinstance(extra, Mapping):
+        return {"available": False, "mapped": False, "keys": [], "constraints": [], "note": "No solver-specific evidence was exposed."}
+
+    certificate = next(
+        (extra[key] for key in ("IIS", "iis") if isinstance(extra.get(key), Mapping)),
+        None,
+    )
+    by_id = {row["constraint_id"]: row for row in constraints}
+    mapped: list[dict[str, Any]] = []
+    if certificate is not None:
+        for key, value in certificate.items():
+            row = by_id.get(key)
+            if row is None:
+                try:
+                    row = by_id.get(int(key))
+                except (TypeError, ValueError):
+                    row = None
+            array = _numeric_array(value)
+            if row is None or array is None:
+                continue
+            nonzero = array[np.isfinite(array) & (np.abs(array) > tol)]
+            if nonzero.size:
+                mapped.append(
                     {
-                        "source": "original_model_structure",
-                        "severity": score,
-                        "cvxpy_index": row.get("cvxpy_index"),
-                        "diagnostics": diagnostics,
-                        "evidence": structural,
-                        "dual": row.get("dual"),
-                        "violation": row.get("violation"),
-                        "slack": row.get("slack"),
-                        "is_active": row.get("is_active"),
+                        "constraint_id": row["constraint_id"],
+                        "cvxpy_index": row["cvxpy_index"],
+                        "max_abs_certificate_entry": float(np.max(np.abs(nonzero))),
+                        "num_nonzero_certificate_entries": int(nonzero.size),
                     }
                 )
-                continue
+    mapped.sort(key=lambda item: item["max_abs_certificate_entry"], reverse=True)
+    return {
+        "available": bool(extra),
+        "mapped": bool(mapped),
+        "keys": sorted(str(key) for key in extra.keys()),
+        "constraints": mapped,
+        "note": (
+            "Solver evidence was mapped to original CVXPY constraint ids."
+            if mapped
+            else "Solver data exists, but it does not expose a constraint-id mapping; it is not used to rank constraints."
+        ),
+    }
 
-        dual = row.get("dual") or {}
-        violation = row.get("violation") or {}
-        dual_score = dual.get("max_abs")
-        violation_score = violation.get("max_abs")
-        if dual_score is not None and row.get("is_active"):
-            score, source = float(dual_score), "active_dual"
-        elif violation_score is not None and float(violation_score) > 0:
-            score, source = float(violation_score), "residual_violation"
-        else:
-            continue
-        ranked.append(
+
+def _coverage(constraints: list[dict[str, Any]], bottlenecks: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "inspected": len(constraints),
+        "with_metadata": sum(bool(row["diagnostics_attached"]) for row in constraints),
+        "with_primal_metrics": sum(row["violation"] is not None for row in constraints),
+        "with_dual_values": sum(row["dual"] is not None for row in constraints),
+        "evidence_backed_bottlenecks": len(bottlenecks),
+        "unresolved": not bool(bottlenecks),
+    }
+
+
+def _recommendations(
+    status_family: str,
+    bottlenecks: list[dict[str, Any]],
+    solver_evidence: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if bottlenecks:
+        return [
             {
-                "source": source,
-                "severity": score,
-                "cvxpy_index": row.get("cvxpy_index"),
-                "diagnostics": row.get("diagnostics"),
-                "dual": row.get("dual"),
-                "violation": row.get("violation"),
-                "slack": row.get("slack"),
-                "is_active": row.get("is_active"),
+                "title": f"Inspect {(row.get('diagnostics') or {}).get('name')}",
+                "detail": (row.get("diagnostics") or {}).get("potential_cause") or f"Evidence source: {row.get('source')}.",
+                "action": (row.get("diagnostics") or {}).get("suggested_relaxation"),
             }
-        )
-    ranked.sort(key=lambda item: float(item["severity"]), reverse=True)
-    for rank, row in enumerate(ranked[:top_k], start=1):
-        row["rank"] = rank
-    return ranked[:top_k]
+            for row in bottlenecks
+        ]
+    if status_family in {"infeasible", "infeasible_inaccurate"}:
+        return [{
+            "title": "No original-constraint mapping available",
+            "detail": "The infeasible solve did not populate primal/dual values or a mapped certificate, so naming one constraint would be speculative.",
+            "action": "Review the complete constraints list or enable a solver-native certificate that preserves original constraint ids.",
+        }]
+    if status_family in {"unbounded", "unbounded_inaccurate", "infeasible_or_unbounded"}:
+        return [{
+            "title": "Inspect objective direction and variable bounds",
+            "detail": "Unboundedness is evidence about a feasible direction, not a violated constraint.",
+            "action": "Review the variables section, objective signs, and missing explicit bounds.",
+        }]
+    if status_family == "solved_inaccurate":
+        return [{
+            "title": "Validate reduced-accuracy results",
+            "detail": "Residual and dual rankings may be noisy.",
+            "action": "Tighten solver tolerances and compare with another suitable solver.",
+        }]
+    if not solver_evidence.get("mapped") and status_family == "not_solved":
+        return [{
+            "title": "Solve the original problem first",
+            "detail": "Structural inventory is available, but numeric evidence requires a solve.",
+            "action": "Solve externally or pass solve_if_needed=True.",
+        }]
+    return []
 
 
-def _solver_stats_row(problem: cp.Problem) -> dict[str, Any] | None:
+def _summary_message(
+    status_family: str,
+    bottlenecks: list[dict[str, Any]],
+    solver_evidence: Mapping[str, Any],
+) -> str:
+    if bottlenecks:
+        return f"The original problem exposes evidence for {len(bottlenecks)} limiting constraint(s)."
+    if status_family in {"infeasible", "infeasible_inaccurate"}:
+        return "The original problem is infeasible, but it exposes no evidence that can be mapped to a specific constraint."
+    if status_family in {"unbounded", "unbounded_inaccurate"}:
+        return "The original problem is unbounded; inspect objective direction and variable bounds."
+    if status_family == "infeasible_or_unbounded":
+        return "The solver could not distinguish infeasible from unbounded."
+    if status_family == "solved_inaccurate":
+        return "The original problem solved to reduced accuracy."
+    if status_family == "solved":
+        return "The original problem solved; active constraints are ranked when dual evidence is available."
+    if status_family == "not_solved":
+        return "The original problem has not been solved; all constraints were inventoried without mutation."
+    return str(solver_evidence.get("note") or "The problem status is uncertain.")
+
+
+def _solver_stats(problem: cp.Problem) -> dict[str, Any] | None:
     stats = getattr(problem, "solver_stats", None)
     if stats is None:
         return None
@@ -411,237 +371,58 @@ def _solver_stats_row(problem: cp.Problem) -> dict[str, Any] | None:
     }
 
 
-def _diagnostics_or_default(index: int, constraint: cp.Constraint) -> ConstraintDiagnostics:
-    diagnostics = get_constraint_diagnostics(constraint)
-    if diagnostics is not None:
-        return diagnostics
+def _solve_original(
+    problem: cp.Problem,
+    solver: Any | None,
+    solve_kwargs: Mapping[str, Any] | None,
+) -> str | None:
+    try:
+        kwargs = dict(solve_kwargs or {})
+        problem.solve(**kwargs) if solver is None else problem.solve(solver=solver, **kwargs)
+        return None
+    except Exception as exc:
+        return repr(exc)
+
+
+def _default_diagnostics(index: int, constraint: cp.Constraint) -> ConstraintDiagnostics:
     return ConstraintDiagnostics(
         name=f"constraint_{index}",
         group="unclassified",
-        description="Unnamed CVXPY constraint.",
-        potential_cause="This unnamed constraint may conflict with the rest of the model.",
-        suggested_relaxation="Attach ConstraintDiagnostics to provide a domain-specific relaxation suggestion.",
+        description=f"Original {type(constraint).__name__} constraint without domain metadata.",
+        potential_cause="No domain-specific interpretation is attached.",
+        suggested_relaxation="Attach ConstraintDiagnostics if a domain-specific action is required.",
     )
 
 
 def _diagnostics_dict(diagnostics: ConstraintDiagnostics) -> dict[str, Any]:
-    data = asdict(diagnostics)
-    data["axis_labels"] = {str(k): list(v) for k, v in diagnostics.axis_labels.items()}
-    data["details"] = dict(diagnostics.details)
-    return data
+    return _json_safe(asdict(diagnostics))
 
 
-def _penalty(slack: cp.Variable, shape: tuple[int, ...], penalize_by_size: bool) -> cp.Expression:
-    penalty = cp.sum(slack)
-    if not penalize_by_size:
-        return penalty
-    size = int(np.prod(shape or (1,)))
-    return penalty / max(1, size)
-
-
-def _solve_relaxed_problem(problem: cp.Problem, solver: Any | None) -> tuple[str | None, str | None]:
-    if solver is not None:
-        try:
-            problem.solve(solver=solver)
-            return str(solver), None
-        except Exception as exc:
-            return str(solver), repr(exc)
-
-    errors: list[str] = []
-    for candidate in _installed_solver_preference():
-        try:
-            problem.solve(solver=candidate)
-            return str(candidate), None
-        except Exception as exc:
-            errors.append(f"{candidate}: {exc!r}")
-    return None, "; ".join(errors) if errors else "no installed CVXPY solver was available"
-
-
-def _installed_solver_preference() -> list[str]:
-    installed = set(cp.installed_solvers())
-    preferred = ["CLARABEL", "ECOS", "SCS", "MOSEK", "OSQP", "SCIPY"]
-    return [solver for solver in preferred if solver in installed]
-
-
-def _slack_location(shape: tuple[int, ...], flat_index: int, diagnostics: ConstraintDiagnostics) -> dict[str, Any]:
-    if not shape:
-        return {}
-
-    multi_index = np.unravel_index(flat_index, shape)
-    axis_labels = list(diagnostics.axis_labels.items())
-    location: dict[str, Any] = {"index": [int(i) for i in multi_index]}
-    if len(axis_labels) == len(shape):
-        for axis, axis_index in zip(axis_labels, multi_index):
-            name, labels = axis
-            if int(axis_index) < len(labels):
-                location[str(name)] = labels[int(axis_index)]
-    elif len(axis_labels) == 1 and len(shape) == 1:
-        name, labels = axis_labels[0]
-        axis_index = int(multi_index[0])
-        if axis_index < len(labels):
-            location[str(name)] = labels[axis_index]
-    if diagnostics.details:
-        for key in ("date", "symbol", "factor"):
-            if key in diagnostics.details and key not in location:
-                location[key] = diagnostics.details[key]
-    return location
-
-
-def _format_location(location: Any) -> str:
-    if not isinstance(location, Mapping) or not location:
-        return ""
-    parts = [f"{key}={value}" for key, value in location.items() if key != "index"]
-    if not parts and location.get("index") is not None:
-        parts = [f"index={location.get('index')}"]
-    return " at " + ", ".join(parts) if parts else ""
-
-
-def _relaxation_recommendation(row: Mapping[str, Any]) -> str:
-    diagnostics = dict(row.get("diagnostics", {}) or {})
-    amount = _fmt_float(row.get("max_relaxation"))
-    units = f" {diagnostics.get('units')}" if diagnostics.get("units") else ""
-    suggestion = diagnostics.get("suggested_relaxation") or "Loosen this constraint."
-    return f"{suggestion} Required max relaxation is {amount}{units}."
-
-
-def _solver_constraint_evidence(problem: cp.Problem, *, tol: float, top_k: int) -> dict[str, Any]:
-    stats = getattr(problem, "solver_stats", None)
-    extra = getattr(stats, "extra_stats", None) if stats is not None else None
-    if not isinstance(extra, Mapping) or "IIS" not in extra:
-        return {"available": False, "note": "No high-level IIS evidence was exposed by solver_stats.extra_stats."}
-
-    iis = extra.get("IIS")
-    if not isinstance(iis, Mapping):
-        return {"available": False, "note": "IIS evidence was present but not mapping-shaped."}
-
-    by_id = {getattr(c, "id", None): (i, c) for i, c in enumerate(problem.constraints)}
-    rows: list[dict[str, Any]] = []
-    for key, value in iis.items():
-        arr = _numeric_array(value)
-        if arr is None:
-            continue
-        nz = np.flatnonzero(np.isfinite(arr) & (np.abs(arr) > tol))
-        if nz.size == 0:
-            continue
-        index, constraint = by_id.get(key, (None, None))
-        if constraint is None:
-            try:
-                index, constraint = by_id.get(int(key), (None, None))
-            except Exception:
-                constraint = None
-        diagnostics = _diagnostics_or_default(index if index is not None else -1, constraint) if constraint is not None else None
-        rows.append(
-            {
-                "constraint_id": key,
-                "cvxpy_index": index,
-                "max_abs_certificate_entry": float(np.max(np.abs(arr[nz]))),
-                "num_nonzero_certificate_entries": int(nz.size),
-                "diagnostics": _diagnostics_dict(diagnostics) if diagnostics is not None else None,
-            }
-        )
-    rows.sort(key=lambda r: r["max_abs_certificate_entry"], reverse=True)
-    return {"available": bool(rows), "constraints": rows[:top_k]}
-
-
-def _recommendations(
-    status_family: str,
-    elastic: Mapping[str, Any] | None,
-    solver_evidence: Mapping[str, Any],
-    bottlenecks: list[dict[str, Any]],
-    top_k: int,
-) -> list[dict[str, Any]]:
-    recommendations: list[dict[str, Any]] = []
-
-    if status_family in {"infeasible", "infeasible_inaccurate"}:
-        structural = [row for row in bottlenecks if row.get("source") == "original_model_structure"]
-        if structural:
-            for row in structural[: min(top_k, 5)]:
-                diagnostics = dict(row.get("diagnostics", {}) or {})
-                evidence = list(row.get("evidence", []) or [])
-                recommendations.append(
-                    {
-                        "title": f"Inspect {diagnostics.get('name')}",
-                        "detail": (evidence[0].get("message") if evidence else diagnostics.get("potential_cause")),
-                        "action": diagnostics.get("suggested_relaxation"),
-                    }
-                )
-        elif isinstance(elastic, Mapping) and elastic.get("violations"):
-            for row in list(elastic.get("violations", []) or [])[: min(top_k, 5)]:
-                diagnostics = dict(row.get("diagnostics", {}) or {})
-                recommendations.append(
-                    {
-                        "title": f"Relax {diagnostics.get('name')}",
-                        "detail": row.get("recommendation"),
-                        "action": diagnostics.get("suggested_relaxation"),
-                    }
-                )
-        elif isinstance(elastic, Mapping) and elastic.get("solve_error"):
-            recommendations.append(
-                {
-                    "title": "Elastic relaxation did not solve",
-                    "detail": "The diagnostic could not compute required slack amounts.",
-                    "action": "Inspect the solve error and try a conic solver such as CLARABEL or SCS.",
-                }
-            )
-        else:
-            recommendations.append(
-                {
-                    "title": "Inspect original constraint evidence",
-                    "detail": "The original solved model is infeasible, but it exposes no primal values or mapped certificate rows.",
-                    "action": "Add constraint-owned structural evidence or use a solver that exposes a mapped infeasibility certificate.",
-                }
-            )
-
-    if status_family in {"unbounded", "unbounded_inaccurate", "infeasible_or_unbounded"}:
-        recommendations.append(
-            {
-                "title": "Check bounds and objective direction",
-                "detail": "The status is dual-infeasible or unbounded; slack relaxations are not the primary explanation.",
-                "action": (
-                    "Verify variable bounds, participation/capacity constraints, hard completion constraints, "
-                    "objective signs, and any missing domain constraints."
-                ),
-            }
-        )
-
-    if status_family == "solved_inaccurate":
-        recommendations.append(
-            {
-                "title": "Validate the reduced-accuracy solution",
-                "detail": "The solver returned an inaccurate optimum, so residual and shadow-price rankings may be noisy.",
-                "action": "Inspect constraint violations, tighten solver tolerances, and compare with another conic solver.",
-            }
-        )
-
-    if solver_evidence.get("available"):
-        names = [
-            str((row.get("diagnostics") or {}).get("name"))
-            for row in list(solver_evidence.get("constraints", []) or [])[:top_k]
-            if row.get("diagnostics")
-        ]
-        recommendations.append(
-            {
-                "title": "Inspect solver IIS evidence",
-                "detail": "Solver certificate evidence references: " + ", ".join(names),
-                "action": "Look for contradictory requirements among these constraint groups.",
-            }
-        )
-
-    return recommendations
-
-
-def _unsupported_row(
-    index: int,
-    constraint: cp.Constraint,
-    diagnostics: ConstraintDiagnostics,
-    reason: str,
-) -> dict[str, Any]:
+def _array_summary(value: Any) -> dict[str, Any] | None:
+    array = _numeric_array(value)
+    if array is None or not array.size:
+        return None
+    finite = array[np.isfinite(array)]
+    if not finite.size:
+        return None
     return {
-        "cvxpy_index": index,
-        "constraint_type": type(constraint).__name__,
-        "reason": reason,
-        "diagnostics": _diagnostics_dict(diagnostics),
+        "max_abs": float(np.max(np.abs(finite))),
+        "l2_norm": float(np.linalg.norm(finite)),
+        "sample": _json_safe(array[:20]),
     }
+
+
+def _numeric_array(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [_numeric_array(item) for item in value]
+        valid = [part for part in parts if part is not None]
+        return np.concatenate(valid) if valid else None
+    try:
+        return np.asarray(value, dtype=float).ravel()
+    except (TypeError, ValueError):
+        return None
 
 
 def _status_family(status: Any) -> str:
@@ -650,77 +431,53 @@ def _status_family(status: Any) -> str:
     text = str(status).lower()
     if "infeasible" in text and "unbounded" in text:
         return "infeasible_or_unbounded"
-    if "infeasible" in text and "inaccurate" in text:
-        return "infeasible_inaccurate"
-    if "unbounded" in text and "inaccurate" in text:
-        return "unbounded_inaccurate"
     if "infeasible" in text:
-        return "infeasible"
+        return "infeasible_inaccurate" if "inaccurate" in text else "infeasible"
     if "unbounded" in text:
-        return "unbounded"
-    if "optimal" in text and "inaccurate" in text:
-        return "solved_inaccurate"
-    if "optimal" in text or "solved" in text:
-        return "solved"
-    if "unknown" in text or "user_limit" in text or "inaccurate" in text:
-        return "uncertain"
-    return "not_solved"
+        return "unbounded_inaccurate" if "inaccurate" in text else "unbounded"
+    if "optimal" in text:
+        return "solved_inaccurate" if "inaccurate" in text else "solved"
+    return "uncertain"
 
 
-def _summary_message(status_family: str, elastic: Mapping[str, Any] | None) -> str:
-    if status_family in {"infeasible", "infeasible_inaccurate"}:
-        if isinstance(elastic, Mapping) and elastic.get("violations"):
-            return "The problem is primal infeasible; the elastic pass found concrete relaxation candidates."
-        if isinstance(elastic, Mapping) and elastic.get("solve_error"):
-            return "The problem is primal infeasible, but the elastic relaxation pass failed."
-        return "The original problem is primal infeasible; inspect structural constraint evidence and solver certificates."
-    if status_family in {"unbounded", "unbounded_inaccurate"}:
-        return "The problem appears dual infeasible or unbounded; inspect missing bounds and objective direction."
-    if status_family == "infeasible_or_unbounded":
-        return "The solver could not distinguish infeasible from unbounded; inspect bounds and re-solve with stricter settings."
-    if status_family == "solved":
-        return "The problem solved successfully; active constraints are ranked by shadow price where available."
-    if status_family == "solved_inaccurate":
-        return "The problem solved to reduced accuracy; inspect residuals and active constraints before relying on it."
-    if status_family == "not_solved":
-        return "The problem has not been solved; pass solve_if_needed=True to solve explicitly before diagnosis."
-    return "The problem status is not a solved infeasible/unbounded terminal status."
-
-
-def _numeric_array(value: Any) -> np.ndarray | None:
-    if value is None:
-        return None
+def _safe_bool_call(value: Any, method: str) -> bool | None:
     try:
-        return np.asarray(value, dtype=float).ravel()
-    except Exception:
+        return bool(getattr(value, method)())
+    except (AttributeError, TypeError, ValueError):
         return None
 
 
-def _safe_name(name: str) -> str:
-    chars = [ch if ch.isalnum() or ch == "_" else "_" for ch in str(name)]
-    safe = "".join(chars).strip("_")
-    return safe or "constraint"
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _meaningful_attribute(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, (list, tuple)) and not value:
+        return False
+    return True
 
 
 def _short_str(value: Any, max_chars: int) -> str:
     text = str(value)
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 3] + "..."
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
 
 
 def _fmt_float(value: Any) -> str:
-    if value is None:
-        return "None"
     try:
         number = float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return str(value)
-    if math.isnan(number):
-        return "nan"
-    if math.isinf(number):
-        return "inf" if number > 0 else "-inf"
-    return f"{number:.6g}"
+    return f"{number:.6g}" if math.isfinite(number) else str(number)
 
 
 def _finite_or_str(value: Any) -> Any:
@@ -728,10 +485,6 @@ def _finite_or_str(value: Any) -> Any:
         return None
     try:
         number = float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return str(value)
-    if math.isnan(number):
-        return "nan"
-    if math.isinf(number):
-        return "inf" if number > 0 else "-inf"
-    return number
+    return number if math.isfinite(number) else str(number)

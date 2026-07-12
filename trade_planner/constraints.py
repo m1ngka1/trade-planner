@@ -85,23 +85,6 @@ class ParticipationCapacityConstraint:
     """Limit each date-symbol trade by the participation cap model."""
 
     def constraints(self, ctx: PlannerContext, state: OptimizationState) -> list[cp.Constraint]:
-        available = np.sum(state.caps, axis=0)
-        required = np.abs(state.target)
-        shortfall = np.maximum(required - available, 0.0)
-        structural_violations = [
-            {
-                "symbol": ctx.symbols[index],
-                "required_abs_shares": float(required[index]),
-                "available_capacity": float(available[index]),
-                "shortfall_shares": float(shortfall[index]),
-                "severity": float(shortfall[index] / max(required[index], 1.0)),
-                "message": (
-                    f"{ctx.symbols[index]} requires {required[index]:.6g} shares but the original "
-                    f"planning window provides only {available[index]:.6g} shares of capacity."
-                ),
-            }
-            for index in np.flatnonzero(shortfall > 1e-8)
-        ]
         return [
             with_diagnostics(
                 cp.abs(state.trades) <= state.caps,
@@ -116,10 +99,6 @@ class ParticipationCapacityConstraint:
                     suggested_relaxation="Increase participation caps, extend the trading window, or relax full completion.",
                     units="shares",
                     axis_labels={"date": _date_labels(ctx.dates), "symbol": tuple(ctx.symbols)},
-                    details={
-                        "requires_hard_completion": True,
-                        "structural_violations": structural_violations,
-                    },
                 ),
             )
         ]
@@ -353,57 +332,6 @@ class FactorExposureLimit:
             dollars = cp.multiply(ctx.price[date_index], expr)
             factor_exposure = matrix.T @ dollars
             date_label = str(ctx.dates[date_index].date())
-            upper_violations: list[dict[str, Any]] = []
-            lower_violations: list[dict[str, Any]] = []
-            if self.use_residual:
-                cumulative_capacity = np.sum(state.caps[: date_index + 1], axis=0)
-                remaining_abs = np.maximum(np.abs(state.target) - cumulative_capacity, 0.0)
-                residual_low = np.where(state.target >= 0, remaining_abs, -np.abs(state.target))
-                residual_high = np.where(state.target >= 0, np.abs(state.target), -remaining_abs)
-                coefficients = matrix * ctx.price[date_index, :, None]
-                minimum = np.sum(
-                    np.where(coefficients >= 0, coefficients * residual_low[:, None], coefficients * residual_high[:, None]),
-                    axis=0,
-                )
-                maximum = np.sum(
-                    np.where(coefficients >= 0, coefficients * residual_high[:, None], coefficients * residual_low[:, None]),
-                    axis=0,
-                )
-                for factor_index, factor in enumerate(factor_labels):
-                    if minimum[factor_index] > self.max_abs_exposure + 1e-8:
-                        required_relaxation = float(minimum[factor_index] - self.max_abs_exposure)
-                        upper_violations.append(
-                            {
-                                "date": date_label,
-                                "factor": factor,
-                                "best_case_exposure": float(minimum[factor_index]),
-                                "limit": float(self.max_abs_exposure),
-                                "required_relaxation_dollars": required_relaxation,
-                                "severity": required_relaxation / max(abs(float(self.max_abs_exposure)), 1.0),
-                                "message": (
-                                    f"Even after using all original capacity through {date_label}, the lowest "
-                                    f"reachable {factor} exposure is {minimum[factor_index]:.6g}, above the "
-                                    f"{self.max_abs_exposure:.6g} upper limit."
-                                ),
-                            }
-                        )
-                    if maximum[factor_index] < -self.max_abs_exposure - 1e-8:
-                        required_relaxation = float(-self.max_abs_exposure - maximum[factor_index])
-                        lower_violations.append(
-                            {
-                                "date": date_label,
-                                "factor": factor,
-                                "best_case_exposure": float(maximum[factor_index]),
-                                "limit": float(-self.max_abs_exposure),
-                                "required_relaxation_dollars": required_relaxation,
-                                "severity": required_relaxation / max(abs(float(self.max_abs_exposure)), 1.0),
-                                "message": (
-                                    f"Even after using all original capacity through {date_label}, the highest "
-                                    f"reachable {factor} exposure is {maximum[factor_index]:.6g}, below the "
-                                    f"{-self.max_abs_exposure:.6g} lower limit."
-                                ),
-                            }
-                        )
             out.extend(
                 [
                     with_diagnostics(
@@ -415,14 +343,11 @@ class FactorExposureLimit:
                             potential_cause="The exposure limit is too tight relative to the order mix and available trading capacity.",
                             suggested_relaxation="Increase factor exposure limits, relax completion timing, or adjust the basket composition.",
                             units="dollars",
-                            weight=1.0 / max(abs(float(self.max_abs_exposure)), 1.0),
                             axis_labels={"factor": factor_labels},
                             details={
                                 "date": date_label,
                                 "max_abs_exposure": float(self.max_abs_exposure),
                                 "use_residual": bool(self.use_residual),
-                                "requires_constraint_groups": ["capacity", "direction"],
-                                "structural_violations": upper_violations,
                             },
                         ),
                     ),
@@ -435,14 +360,11 @@ class FactorExposureLimit:
                             potential_cause="The exposure limit is too tight relative to the order mix and available trading capacity.",
                             suggested_relaxation="Increase factor exposure limits, relax completion timing, or adjust the basket composition.",
                             units="dollars",
-                            weight=1.0 / max(abs(float(self.max_abs_exposure)), 1.0),
                             axis_labels={"factor": factor_labels},
                             details={
                                 "date": date_label,
                                 "max_abs_exposure": float(self.max_abs_exposure),
                                 "use_residual": bool(self.use_residual),
-                                "requires_constraint_groups": ["capacity", "direction"],
-                                "structural_violations": lower_violations,
                             },
                         ),
                     ),

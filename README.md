@@ -103,37 +103,40 @@ Run the complete example with:
 python -m examples.announcement_participation
 ```
 
-## CVXPY Bottleneck Diagnostics
+## CVXPY Model Diagnostics
 
 Attach domain meaning directly to each CVXPY constraint with
 `with_diagnostics(...)`, solve the problem, then inspect it:
 
 ```python
-report = diagnose_infeasible_problem(problem)
+report = diagnose_problem(problem)
 print(report["text"])
 ```
 
-The report includes status and solver statistics, per-constraint dual values,
-slack and residual norms when a primal solution exists, ranked active
-constraints for solved/suboptimal models, optional elastic slack rankings for
-primal infeasibility, and bounds/objective guidance for dual infeasibility or
-unboundedness. An unsolved problem is not solved implicitly; opt in with
-`diagnose_infeasible_problem(problem, solve_if_needed=True)`.
+The diagnostic iterates over every entry in `problem.constraints`, regardless of
+whether it is an equality, inequality, SOC, PSD, exponential-cone, or a future
+CVXPY constraint type. Each row contains its original id, type, shape,
+variables, parameters, domain metadata, dual value, residual, and slack when
+CVXPY exposes those values. `coverage` states exactly how many constraints had
+primal metrics, dual values, and attached metadata.
+
+The function never removes, replaces, or relaxes constraints. An unsolved
+problem is not solved implicitly; opt in to solving the same original object
+with `diagnose_problem(problem, solve_if_needed=True)`. The older
+`diagnose_infeasible_problem` name remains as an alias.
 
 CVXPY exposes statuses, dual values, constraint residuals, and solver-specific
 `solver_stats`, but infeasible solves generally do not populate primal variable
-values. The default diagnostic therefore ranks structural evidence attached by
-the original constraint plugins and never creates or solves a relaxed model.
-`run_elastic=True` remains available only as an explicit compatibility tool and
-should not be treated as a formal irreducible infeasible set.
-MOSEK can produce primal/dual infeasibility certificates and a presolve report,
-but CVXPY canonicalization may prevent a stable one-to-one mapping from low-level
-solver rows back to original constraints. `solver_stats.extra_stats["IIS"]` is
-used when a solver exposes a high-level mapping; otherwise constraint-owned
-metadata plus original-model structural inspection is the portable path. For
-deeper MOSEK work,
-use `problem.get_problem_data(cp.MOSEK)` and the native Task API as a separate,
-solver-specific diagnostic workflow.
+values. A constraint is ranked only when the original object provides evidence:
+a nonzero residual, an active shadow price, an infeasibility dual stored on the
+original constraint, or a solver certificate mapped to its CVXPY constraint id.
+If an infeasible solver result exposes only an unmapped raw
+certificate, the report inventories every constraint but explicitly leaves the
+bottleneck unresolved rather than guessing. MOSEK can produce primal/dual
+infeasibility certificates and a presolve report, but CVXPY canonicalization may
+prevent a stable one-to-one mapping from low-level rows back to original
+constraints; use the native Task API separately when that deeper evidence is
+required.
 
 References: [CVXPY statuses and infeasible/unbounded behavior](https://www.cvxpy.org/tutorial/intro/index.html),
 [CVXPY constraint residual API](https://www.cvxpy.org/api_reference/cvxpy.constraints.html),

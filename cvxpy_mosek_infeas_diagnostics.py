@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entry point for CVXPY infeasibility diagnostics.
+"""Compatibility entry point for generic CVXPY model diagnostics.
 
 The implementation lives in `trade_planner.diagnostics` so package code can use
 the same helper that this standalone module exports.
@@ -15,13 +15,15 @@ import cvxpy as cp
 from trade_planner.constraints import ConstraintDiagnostics, with_diagnostics
 from trade_planner.diagnostics import (
     diagnose_infeasible_problem,
-    elastic_feasibility_report,
+    diagnose_problem,
+    format_diagnosis,
     format_infeasibility_diagnosis,
 )
 
 __all__ = [
     "diagnose_infeasible_problem",
-    "elastic_feasibility_report",
+    "diagnose_problem",
+    "format_diagnosis",
     "format_infeasibility_diagnosis",
 ]
 
@@ -39,14 +41,6 @@ def build_toy_infeasible_problem() -> cp.Problem:
                 potential_cause="Demand is higher than available stock.",
                 suggested_relaxation="Lower committed demand or add supply.",
                 units="units",
-                details={
-                    "structural_violations": [
-                        {
-                            "severity": 3.0 / 10.0,
-                            "message": "The original lower bound 10 is above the original upper bound 7.",
-                        }
-                    ]
-                },
             ),
         ),
         with_diagnostics(
@@ -58,14 +52,6 @@ def build_toy_infeasible_problem() -> cp.Problem:
                 potential_cause="Stock is below committed demand.",
                 suggested_relaxation="Increase available stock or split the shipment.",
                 units="units",
-                details={
-                    "structural_violations": [
-                        {
-                            "severity": 3.0 / 7.0,
-                            "message": "The original upper bound 7 is below the original lower bound 10.",
-                        }
-                    ]
-                },
             ),
         ),
     ]
@@ -84,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     problem = build_toy_infeasible_problem()
     problem.solve(solver=_installed_conic_solver())
-    report = diagnose_infeasible_problem(problem, top_k=args.top_k)
+    report = diagnose_problem(problem, top_k=args.top_k)
     print(format_infeasibility_diagnosis(report, top_k=args.top_k))
     return 0
 

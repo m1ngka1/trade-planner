@@ -32,7 +32,7 @@ from .data import (
     build_planner_dates,
     normalize_orders,
 )
-from .diagnostics import diagnose_infeasible_problem, elastic_feasibility_report, format_infeasibility_diagnosis
+from .diagnostics import diagnose_infeasible_problem, diagnose_problem, format_diagnosis, format_infeasibility_diagnosis
 from .participation import (
     AnnouncementParticipationCurve,
     AnnouncementParticipationModifier,
@@ -96,7 +96,8 @@ __all__ = [
     "default_constraints",
     "default_earnings_aware_config",
     "diagnose_infeasible_problem",
-    "elastic_feasibility_report",
+    "diagnose_problem",
+    "format_diagnosis",
     "format_infeasibility_diagnosis",
     "get_constraint_diagnostics",
     "normalize_orders",

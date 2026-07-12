@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from types import SimpleNamespace
 
 import cvxpy as cp
 import numpy as np
@@ -22,7 +24,7 @@ from trade_planner.constraints import (
 )
 from trade_planner.context import PlannerContext
 from trade_planner.costs import CompositeCostModel
-from trade_planner.diagnostics import diagnose_infeasible_problem, format_infeasibility_diagnosis
+from trade_planner.diagnostics import diagnose_infeasible_problem, diagnose_problem, format_infeasibility_diagnosis
 from trade_planner.participation import ParticipationCapModel
 from trade_planner.planner import TradePlanner
 from trade_planner.risk import StaticCovarianceRiskModel
@@ -93,6 +95,25 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
         self.assertIsNotNone(report["constraints"][0]["violation"])
         self.assertIsNotNone(report["solver_stats"])
 
+    def test_mapped_solver_certificate_ranks_original_constraint(self) -> None:
+        x = cp.Variable(name="x")
+        constraint = x >= 1
+        problem = cp.Problem(cp.Minimize(x), [constraint])
+        problem.solve(solver=_solver())
+        problem._solver_stats = SimpleNamespace(
+            solver_name="mock",
+            solve_time=0.0,
+            setup_time=0.0,
+            num_iters=1,
+            extra_stats={"IIS": {constraint.id: np.array([2.0])}},
+        )
+
+        report = diagnose_problem(problem)
+
+        self.assertTrue(report["solver_evidence"]["mapped"])
+        self.assertEqual(report["bottlenecks"][0]["source"], "solver_certificate")
+        self.assertEqual(report["bottlenecks"][0]["cvxpy_index"], 0)
+
     def test_builtin_constraints_attach_diagnostics(self) -> None:
         ctx = _context()
         trades = cp.Variable((len(ctx.dates), len(ctx.symbols)))
@@ -124,7 +145,7 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
             self.assertTrue(diagnostics.potential_cause)
             self.assertTrue(diagnostics.suggested_relaxation)
 
-    def test_scalar_infeasible_problem_reports_tagged_relaxations(self) -> None:
+    def test_infeasible_problem_inspects_every_original_constraint_without_relaxation(self) -> None:
         x = cp.Variable(name="x")
         constraints = [
             with_diagnostics(
@@ -150,14 +171,44 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
         ]
         problem = cp.Problem(cp.Minimize(0), constraints)
         problem.solve(solver=_solver())
+        original_ids = [constraint.id for constraint in problem.constraints]
 
-        report = diagnose_infeasible_problem(problem, run_elastic=True)
+        report = diagnose_infeasible_problem(problem)
         text = format_infeasibility_diagnosis(report)
 
+        self.assertEqual([constraint.id for constraint in problem.constraints], original_ids)
+        self.assertEqual(report["coverage"]["inspected"], len(problem.constraints))
         self.assertIn("minimum_x", {row["diagnostics"]["name"] for row in report["constraints"]})
         self.assertIn("maximum_x", {row["diagnostics"]["name"] for row in report["constraints"]})
-        self.assertGreater(len(report["elastic"]["violations"]), 0)
-        self.assertIn("Required max relaxation", text)
+        self.assertNotIn("elastic", report)
+        self.assertEqual({row["source"] for row in report["bottlenecks"]}, {"infeasibility_dual"})
+        self.assertIn("evidence-backed bottlenecks", text.lower())
+
+    def test_generic_constraint_types_are_all_inventoried(self) -> None:
+        x = cp.Variable(2, name="x")
+        t = cp.Variable(name="t")
+        matrix = cp.Variable((2, 2), symmetric=True, name="matrix")
+        exp_x = cp.Variable(name="exp_x")
+        exp_y = cp.Variable(name="exp_y")
+        exp_z = cp.Variable(name="exp_z")
+        problem = cp.Problem(
+            cp.Minimize(0),
+            [cp.SOC(t, x), matrix >> 0, x[0] == 1, cp.ExpCone(exp_x, exp_y, exp_z)],
+        )
+
+        report = diagnose_problem(problem)
+
+        self.assertEqual(report["coverage"]["inspected"], 4)
+        self.assertEqual(
+            {row["constraint_type"] for row in report["constraints"]},
+            {"SOC", "PSD", "Equality", "ExpCone"},
+        )
+        self.assertTrue(all(row["state"] == "unavailable" for row in report["constraints"]))
+        self.assertEqual(
+            {row["name"] for row in report["variables"]},
+            {"x", "t", "matrix", "exp_x", "exp_y", "exp_z"},
+        )
+        json.dumps(report)
 
     def test_planner_infeasible_error_carries_diagnostics(self) -> None:
         ctx = _context(targets=[100.0, 0.0], base_participation=0.01)
@@ -179,12 +230,13 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
 
         diagnostics = raised.exception.diagnostics
         self.assertIsNotNone(diagnostics)
-        self.assertIsNone(diagnostics["elastic"])
-        text = diagnostics["text"].lower()
-        self.assertIn("capacity", text)
-        self.assertIn("completion", text)
+        groups = {row["diagnostics"]["group"] for row in diagnostics["constraints"]}
+        self.assertIn("capacity", groups)
+        self.assertIn("completion", groups)
+        self.assertEqual(diagnostics["coverage"]["inspected"], diagnostics["summary"]["num_constraints"])
+        self.assertNotIn("elastic", diagnostics)
 
-    def test_factor_exposure_limit_is_identified_as_bottleneck(self) -> None:
+    def test_factor_exposure_constraints_are_inspected_without_special_case_logic(self) -> None:
         ctx = _context(targets=[100.0, 0.0], base_participation=0.5)
         exposures = pd.DataFrame({"market": [1.0, 0.0]}, index=ctx.symbols)
         config = TradePlannerConfig(
@@ -204,10 +256,10 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(InfeasiblePlanError) as raised:
             TradePlanner(config).solve(ctx)
 
-        bottlenecks = raised.exception.diagnostics["bottlenecks"]
-        groups = {row["diagnostics"]["group"] for row in bottlenecks}
+        diagnostics = raised.exception.diagnostics
+        groups = {row["diagnostics"]["group"] for row in diagnostics["constraints"]}
         self.assertIn("factor_exposure", groups)
-        self.assertTrue(all(row["source"] == "original_model_structure" for row in bottlenecks))
+        self.assertEqual(diagnostics["coverage"]["inspected"], diagnostics["summary"]["num_constraints"])
 
     def test_unbounded_problem_reports_bounds_not_slack(self) -> None:
         x = cp.Variable(name="x")
@@ -230,7 +282,7 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
         report = diagnose_infeasible_problem(problem)
         text = format_infeasibility_diagnosis(report).lower()
 
-        self.assertIsNone(report["elastic"])
+        self.assertNotIn("elastic", report)
         self.assertIn("bounds", text)
         self.assertIn("objective", text)
 
