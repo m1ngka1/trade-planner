@@ -33,7 +33,14 @@ from .data import (
     normalize_orders,
 )
 from .diagnostics import diagnose_infeasible_problem, elastic_feasibility_report, format_infeasibility_diagnosis
-from .participation import LogisticEarningsParticipation, ParticipationCapModel, PiecewiseEarningsParticipation
+from .participation import (
+    AnnouncementParticipationCurve,
+    AnnouncementParticipationModifier,
+    LogisticEarningsParticipation,
+    ParticipationCapModel,
+    PiecewiseEarningsParticipation,
+    announcement_participation_rates,
+)
 from .planner import TradePlanner, TradePlannerResult
 from .risk import (
     BarraFactorRiskModel,
@@ -46,6 +53,8 @@ from .types import InfeasiblePlanError
 
 __all__ = [
     "BarraFactorRiskModel",
+    "AnnouncementParticipationCurve",
+    "AnnouncementParticipationModifier",
     "CompositeCostModel",
     "ConstraintDiagnostics",
     "ConstraintPlugin",
@@ -92,4 +101,5 @@ __all__ = [
     "get_constraint_diagnostics",
     "normalize_orders",
     "with_diagnostics",
+    "announcement_participation_rates",
 ]

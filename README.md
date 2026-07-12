@@ -69,6 +69,90 @@ Run the synthetic example with:
 python -m trade_planner.examples
 ```
 
+## Announcement Participation Rates
+
+Use `AnnouncementParticipationCurve` when the announcement date is known and
+the planning horizon spans both sides of it. The announcement date itself stays
+at the cautious pre-event rate; the higher rate begins the following day.
+
+```python
+import pandas as pd
+from trade_planner import AnnouncementParticipationCurve
+
+dates = pd.date_range("2026-07-01", periods=15, freq="D")
+rates = AnnouncementParticipationCurve(
+    pre_rate=0.025,
+    post_rate=0.15,
+).rates(dates, announcement_date=dates[9])
+
+assert rates.iloc[4] == 0.025   # Day 5
+assert rates.iloc[9] == 0.025   # Day 10 / announcement
+assert rates.iloc[11] == 0.15   # Day 12
+```
+
+Set `transition="logistic"` for a smooth post-announcement ramp. Optional
+`pre_volatility_sensitivity` and `post_volatility_sensitivity` apply inverse
+volatility scaling: higher volatility reduces the rate and falling volatility
+raises it. Inputs may be NumPy arrays or pandas Series. To use absolute event
+rates inside the planner, add `AnnouncementParticipationModifier` to
+`ParticipationCapModel`; modifiers may exceed 1x so a 2.5% base can become 15%.
+
+Run the complete example with:
+
+```bash
+python -m examples.announcement_participation
+```
+
+## CVXPY Bottleneck Diagnostics
+
+Attach domain meaning directly to each CVXPY constraint with
+`with_diagnostics(...)`, solve the problem, then inspect it:
+
+```python
+report = diagnose_infeasible_problem(problem)
+print(report["text"])
+```
+
+The report includes status and solver statistics, per-constraint dual values,
+slack and residual norms when a primal solution exists, ranked active
+constraints for solved/suboptimal models, optional elastic slack rankings for
+primal infeasibility, and bounds/objective guidance for dual infeasibility or
+unboundedness. An unsolved problem is not solved implicitly; opt in with
+`diagnose_infeasible_problem(problem, solve_if_needed=True)`.
+
+CVXPY exposes statuses, dual values, constraint residuals, and solver-specific
+`solver_stats`, but infeasible solves generally do not populate primal variable
+values. The default diagnostic therefore ranks structural evidence attached by
+the original constraint plugins and never creates or solves a relaxed model.
+`run_elastic=True` remains available only as an explicit compatibility tool and
+should not be treated as a formal irreducible infeasible set.
+MOSEK can produce primal/dual infeasibility certificates and a presolve report,
+but CVXPY canonicalization may prevent a stable one-to-one mapping from low-level
+solver rows back to original constraints. `solver_stats.extra_stats["IIS"]` is
+used when a solver exposes a high-level mapping; otherwise constraint-owned
+metadata plus original-model structural inspection is the portable path. For
+deeper MOSEK work,
+use `problem.get_problem_data(cp.MOSEK)` and the native Task API as a separate,
+solver-specific diagnostic workflow.
+
+References: [CVXPY statuses and infeasible/unbounded behavior](https://www.cvxpy.org/tutorial/intro/index.html),
+[CVXPY constraint residual API](https://www.cvxpy.org/api_reference/cvxpy.constraints.html),
+[CVXPY solver statistics](https://www.cvxpy.org/tutorial/solvers/index.html), and
+[MOSEK Python API](https://docs.mosek.com/latest/pythonapi/index.html).
+
+## Development Environment
+
+Create the Python 3.12 environment and run the suite:
+
+```bash
+conda env create -f environment.yml
+conda run -n trade-planner-dev python -m pytest -q
+```
+
+ECOS, SCS, CLARABEL, and OSQP are included as license-free fallbacks. MOSEK is
+optional because it requires a supported installation and license; install its
+Python package in this environment only when that license is available.
+
 ## Production Context Flow
 
 The intended production path is that users provide only:

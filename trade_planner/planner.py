@@ -110,7 +110,7 @@ class TradePlanner:
         except cp.SolverError:
             problem.solve(solver="CLARABEL", warm_start=True)
         if problem.status not in {"optimal", "optimal_inaccurate"}:
-            diagnostics = diagnose_infeasible_problem(problem, run_elastic=True)
+            diagnostics = diagnose_infeasible_problem(problem, run_elastic=False)
             message = diagnostics.get("summary", {}).get("message") or "Optimization did not solve."
             raise InfeasiblePlanError(
                 f"Optimization failed with status {problem.status}: {message}",

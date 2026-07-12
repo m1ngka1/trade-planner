@@ -1,4 +1,6 @@
 __pycache__/
 *.py[cod]
 .venv/
+.conda-env/
+*.egg-info/
 .pytest_cache/

@@ -1,0 +1,17 @@
+name: trade-planner-dev
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - cvxpy
+  - numpy
+  - pandas
+  - matplotlib
+  - pytest
+  - ecos
+  - scs
+  - osqp
+  - clarabel
+  - pip
+  - pip:
+      - -e .

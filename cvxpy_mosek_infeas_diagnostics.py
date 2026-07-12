@@ -39,6 +39,14 @@ def build_toy_infeasible_problem() -> cp.Problem:
                 potential_cause="Demand is higher than available stock.",
                 suggested_relaxation="Lower committed demand or add supply.",
                 units="units",
+                details={
+                    "structural_violations": [
+                        {
+                            "severity": 3.0 / 10.0,
+                            "message": "The original lower bound 10 is above the original upper bound 7.",
+                        }
+                    ]
+                },
             ),
         ),
         with_diagnostics(
@@ -50,6 +58,14 @@ def build_toy_infeasible_problem() -> cp.Problem:
                 potential_cause="Stock is below committed demand.",
                 suggested_relaxation="Increase available stock or split the shipment.",
                 units="units",
+                details={
+                    "structural_violations": [
+                        {
+                            "severity": 3.0 / 7.0,
+                            "message": "The original upper bound 7 is below the original lower bound 10.",
+                        }
+                    ]
+                },
             ),
         ),
     ]
