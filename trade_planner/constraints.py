@@ -40,11 +40,29 @@ class ConstraintDiagnostics:
     hard: bool = True
     axis_labels: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     details: Mapping[str, Any] = field(default_factory=dict)
+    setting_name: str = ""
+    bound_values: Any = field(default=None, repr=False, compare=False)
+    element_context: Any = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class VariableDiagnostics:
+    """Business labels used to explain an unbounded solver direction."""
+
+    name: str
+    description: str = ""
+    units: str = ""
+    axis_labels: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 _DIAGNOSTICS_ATTR = "_trade_planner_diagnostics"
 _DIAGNOSTICS_BY_OBJECT: weakref.WeakKeyDictionary[cp.Constraint, ConstraintDiagnostics] = weakref.WeakKeyDictionary()
 _DIAGNOSTICS_BY_ID: dict[int, ConstraintDiagnostics] = {}
+_VARIABLE_DIAGNOSTICS_ATTR = "_trade_planner_variable_diagnostics"
+_VARIABLE_DIAGNOSTICS_BY_OBJECT: weakref.WeakKeyDictionary[cp.Variable, VariableDiagnostics] = (
+    weakref.WeakKeyDictionary()
+)
+_VARIABLE_DIAGNOSTICS_BY_ID: dict[int, VariableDiagnostics] = {}
 
 
 def with_diagnostics(constraint: cp.Constraint, diagnostics: ConstraintDiagnostics) -> cp.Constraint:
@@ -73,6 +91,32 @@ def get_constraint_diagnostics(constraint: cp.Constraint) -> ConstraintDiagnosti
     return _DIAGNOSTICS_BY_ID.get(id(constraint))
 
 
+def with_variable_diagnostics(variable: cp.Variable, diagnostics: VariableDiagnostics) -> cp.Variable:
+    """Attach business labels to a CVXPY variable and return it."""
+    try:
+        setattr(variable, _VARIABLE_DIAGNOSTICS_ATTR, diagnostics)
+    except Exception:
+        try:
+            _VARIABLE_DIAGNOSTICS_BY_OBJECT[variable] = diagnostics
+        except TypeError:
+            _VARIABLE_DIAGNOSTICS_BY_ID[id(variable)] = diagnostics
+    return variable
+
+
+def get_variable_diagnostics(variable: cp.Variable) -> VariableDiagnostics | None:
+    """Return diagnostics previously attached with `with_variable_diagnostics`."""
+    diagnostics = getattr(variable, _VARIABLE_DIAGNOSTICS_ATTR, None)
+    if isinstance(diagnostics, VariableDiagnostics):
+        return diagnostics
+    try:
+        diagnostics = _VARIABLE_DIAGNOSTICS_BY_OBJECT.get(variable)
+    except TypeError:
+        diagnostics = None
+    if diagnostics is not None:
+        return diagnostics
+    return _VARIABLE_DIAGNOSTICS_BY_ID.get(id(variable))
+
+
 class ConstraintPlugin(Protocol):
     """Plugin that contributes cvxpy constraints to the planner."""
 
@@ -85,6 +129,26 @@ class ParticipationCapacityConstraint:
     """Limit each date-symbol trade by the participation cap model."""
 
     def constraints(self, ctx: PlannerContext, state: OptimizationState) -> list[cp.Constraint]:
+        total_capacity = np.sum(state.caps, axis=0)
+
+        def element_context(index: tuple[int, ...]) -> Mapping[str, Any]:
+            symbol_index = index[-1]
+            required = float(abs(state.target[symbol_index]))
+            available = float(total_capacity[symbol_index])
+            shortfall = max(required - available, 0.0)
+            return {
+                "parent_target_abs_shares": required,
+                "total_horizon_capacity_shares": available,
+                "capacity_shortfall_shares": shortfall,
+                "pm_action": (
+                    f"Capacity-only adjustment: add at least {shortfall:g} shares of horizon capacity "
+                    f"for {ctx.symbols[symbol_index]}, or reduce/leave {shortfall:g} target shares. "
+                    "Other reported policy conflicts may still need changes."
+                    if shortfall > 0
+                    else "Capacity covers the target; adjust another reported policy conflict."
+                ),
+            }
+
         return [
             with_diagnostics(
                 cp.abs(state.trades) <= state.caps,
@@ -99,6 +163,9 @@ class ParticipationCapacityConstraint:
                     suggested_relaxation="Increase participation caps, extend the trading window, or relax full completion.",
                     units="shares",
                     axis_labels={"date": _date_labels(ctx.dates), "symbol": tuple(ctx.symbols)},
+                    setting_name="participation cap",
+                    bound_values=state.caps,
+                    element_context=element_context,
                 ),
             )
         ]
@@ -124,6 +191,8 @@ class DirectionConstraint:
                     units="shares",
                     weight=10.0,
                     axis_labels={"date": _date_labels(ctx.dates), "symbol": tuple(ctx.symbols)},
+                    setting_name="minimum signed trade",
+                    bound_values=0.0,
                 ),
             )
         ]
@@ -151,6 +220,8 @@ class ZeroTargetConstraint:
                     weight=10.0,
                     axis_labels={"date": _date_labels(ctx.dates), "symbol": zero_symbols},
                     details={"zero_target_symbols": zero_symbols},
+                    setting_name="allowed trade for zero-target names",
+                    bound_values=0.0,
                 ),
             )
         ]
@@ -181,6 +252,26 @@ class HardCompletionConstraint:
         raise InfeasiblePlanError(f"Insufficient capacity for hard completion: {details}")
 
     def constraints(self, ctx: PlannerContext, state: OptimizationState) -> list[cp.Constraint]:
+        total_capacity = np.sum(state.caps, axis=0)
+
+        def element_context(index: tuple[int, ...]) -> Mapping[str, Any]:
+            symbol_index = index[-1]
+            required = float(abs(state.target[symbol_index]))
+            available = float(total_capacity[symbol_index])
+            shortfall = max(required - available, 0.0)
+            return {
+                "parent_target_abs_shares": required,
+                "total_horizon_capacity_shares": available,
+                "capacity_shortfall_shares": shortfall,
+                "pm_action": (
+                    f"Capacity-only adjustment: add at least {shortfall:g} shares of horizon capacity "
+                    f"for {ctx.symbols[symbol_index]}, or reduce/leave {shortfall:g} target shares. "
+                    "Other reported policy conflicts may still need changes."
+                    if shortfall > 0
+                    else "Capacity covers the target; adjust another reported policy conflict."
+                ),
+            }
+
         return [
             with_diagnostics(
                 cp.sum(state.trades, axis=0) == state.target,
@@ -197,6 +288,9 @@ class HardCompletionConstraint:
                     ),
                     units="shares",
                     axis_labels={"symbol": tuple(ctx.symbols)},
+                    setting_name="parent target",
+                    bound_values=state.target,
+                    element_context=element_context,
                 ),
             )
         ]
@@ -226,6 +320,8 @@ class DailyGrossNotionalLimit:
                         units="dollars",
                         axis_labels={"date": (date_label,)},
                         details={"limit": float(limit)},
+                        setting_name="daily gross notional limit",
+                        bound_values=float(limit),
                     ),
                 )
             )
@@ -257,6 +353,8 @@ class DailyNetNotionalLimit:
                             units="dollars",
                             axis_labels={"date": (date_label,)},
                             details={"limit": float(limit)},
+                            setting_name="daily net notional upper limit",
+                            bound_values=float(limit),
                         ),
                     ),
                     with_diagnostics(
@@ -270,6 +368,8 @@ class DailyNetNotionalLimit:
                             units="dollars",
                             axis_labels={"date": (date_label,)},
                             details={"limit": float(limit)},
+                            setting_name="daily net notional lower limit",
+                            bound_values=-float(limit),
                         ),
                     ),
                 ]
@@ -309,6 +409,8 @@ class MinCompletionByDate:
                     units="shares",
                     axis_labels={"symbol": tuple(ctx.symbols)},
                     details={"date": date_label, "fraction": float(self.fraction)},
+                    setting_name="minimum completed shares",
+                    bound_values=self.fraction * np.abs(state.target),
                 ),
             )
         ]
@@ -349,6 +451,8 @@ class FactorExposureLimit:
                                 "max_abs_exposure": float(self.max_abs_exposure),
                                 "use_residual": bool(self.use_residual),
                             },
+                            setting_name="factor exposure upper limit",
+                            bound_values=float(self.max_abs_exposure),
                         ),
                     ),
                     with_diagnostics(
@@ -366,6 +470,8 @@ class FactorExposureLimit:
                                 "max_abs_exposure": float(self.max_abs_exposure),
                                 "use_residual": bool(self.use_residual),
                             },
+                            setting_name="factor exposure lower limit",
+                            bound_values=-float(self.max_abs_exposure),
                         ),
                     ),
                 ]

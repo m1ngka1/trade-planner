@@ -113,56 +113,67 @@ report = diagnose_problem(problem)
 print(report["text"])
 ```
 
-The diagnostic iterates over every entry in `problem.constraints`, regardless of
-whether it is an equality, inequality, SOC, PSD, exponential-cone, or a future
-CVXPY constraint type. Each row contains its original id, type, shape,
-variables, parameters, domain metadata, dual value, residual, and slack when
-CVXPY exposes those values. `coverage` states exactly how many constraints had
-primal metrics, dual values, and attached metadata.
+This is a single-solve design. `diagnose_problem()` never disables a constraint,
+builds an elastic model, or runs one solve per rule. It reads the status,
+constraint metadata, duals/residuals, and structured certificate data already
+returned by the original solve. An unsolved problem is not solved implicitly;
+`solve_if_needed=True` permits exactly one solve of that same object.
 
-The original object is never mutated and the diagnostic does not create a model
-with many artificial slacks. For an infeasible solve it verifies each candidate
-on an isolated copy with only that one constraint omitted. A reported
-`single_constraint_recovery` therefore means the remaining original objective
-and constraints reached an optimum; `witness_violation` records how far the
-feasible witness lies outside the omitted constraint. If no individual omission
-works, the report says the conflict requires multiple changes.
+For a continuous MOSEK solve, CVXPY dualizes the canonical model. Therefore an
+original primal infeasibility appears as `dual_infeas` inside MOSEK. CVXPY maps
+that certificate back to original constraint IDs in
+`problem.solver_stats.extra_stats["IIS"]`. The report then:
 
-An unsolved problem is not solved implicitly; opt in to solving the same
-original object with `diagnose_problem(problem, solve_if_needed=True)`. Set
-`verify_bottlenecks=False` when only a fast evidence snapshot is wanted. The
-optional `max_verification_checks` bounds counterfactual solves for very large
-models. The older `diagnose_infeasible_problem` name remains as an alias.
+1. normalizes the arbitrary certificate scale;
+2. ranks the rules participating in the conflict;
+3. decodes nonzero entries to date, symbol, or factor labels;
+4. shows the current business setting and plugin-owned context such as target,
+   total horizon capacity, and share shortfall; and
+5. prints the action owned by that constraint plugin.
 
-`TradePlanner` keeps its automatic failure report fast and attaches the original
-problem to `InfeasiblePlanError`, so a PM-facing workflow can request verified
-recovery explicitly:
+When MOSEK is requested, `TradePlanner` uses `DiagnosticMOSEK`, a thin CVXPY
+solver adapter. It snapshots MOSEK problem/solution status, the native bound
+certificate activity used by `getslc/getsuc/getslx/getsux`, and the opposite
+certificate before CVXPY closes the Task. That opposite certificate maps an
+original unbounded problem to a labeled joint variable direction in
+`report["improving_direction"]`.
+
+The main PM-facing fields are:
+
+- `decision.what_to_change`: setting, location, current value, and action;
+- `bottlenecks`: scale-normalized members of a primal-infeasibility conflict;
+- `improving_direction`: labeled components of an unbounded ray;
+- `solver_evidence.native_mosek`: canonical MOSEK statuses and solution quality;
+- `summary.additional_solves`: always zero for an already-solved object.
+
+An infeasibility certificate identifies a conflict set, not a guaranteed
+one-rule repair and not the smallest safe limit change. Its relative weights
+also depend on model scaling. The report deliberately says this instead of
+promising that its first-ranked member alone will fix the model. Computing a
+minimum operational change is a different optimization problem and is not run
+automatically.
+
+`TradePlanner` attaches both the report and original problem to
+`InfeasiblePlanError`:
 
 ```python
 try:
     result = planner.solve(ctx)
 except InfeasiblePlanError as error:
-    verified = diagnose_problem(error.problem)
-    print(verified["text"])
+    print(error.diagnostics["text"])
 ```
 
-CVXPY exposes statuses, dual values, constraint residuals, and solver-specific
-`solver_stats`, but infeasible solves generally do not populate primal variable
-values. Candidates are prioritized only when the original object provides evidence:
-a nonzero residual, an active shadow price, an infeasibility dual stored on the
-original constraint, or a solver certificate mapped to its CVXPY constraint id.
-If an infeasible solver result exposes only an unmapped raw
-certificate, the report inventories every constraint but explicitly leaves the
-bottleneck unresolved rather than guessing. MOSEK can produce primal/dual
-infeasibility certificates and a presolve report, but CVXPY canonicalization may
-prevent a stable one-to-one mapping from low-level rows back to original
-constraints; use the native Task API separately when that deeper evidence is
-required.
+Without a mapped certificate, the report inventories the model and leaves the
+cause unresolved rather than guessing. For non-MOSEK solvers, returned
+constraint infeasibility duals are shown only as a lower-confidence fallback.
+Mixed-integer infeasibility is also left unresolved because integer models do not
+provide the continuous dual certificate used here.
 
 References: [CVXPY statuses and infeasible/unbounded behavior](https://www.cvxpy.org/tutorial/intro/index.html),
 [CVXPY constraint residual API](https://www.cvxpy.org/api_reference/cvxpy.constraints.html),
-[CVXPY solver statistics](https://www.cvxpy.org/tutorial/solvers/index.html), and
-[MOSEK Python API](https://docs.mosek.com/latest/pythonapi/index.html).
+[CVXPY's continuous MOSEK dualization](https://www.cvxpy.org/version/1.2/updates/index.html),
+[MOSEK infeasibility certificates](https://docs.mosek.com/latest/pythonapi/tutorial-pinfeas-shared.html), and
+[MOSEK Task certificate APIs](https://docs.mosek.com/latest/pythonapi/optimizer-task.html).
 
 ## Development Environment
 
@@ -173,9 +184,11 @@ conda env create -f environment.yml
 conda run -n trade-planner-dev python -m pytest -q
 ```
 
-ECOS, SCS, CLARABEL, and OSQP are included as license-free fallbacks. MOSEK is
-optional because it requires a supported installation and license; install its
-Python package in this environment only when that license is available.
+ECOS, SCS, CLARABEL, and OSQP are included as license-free fallbacks. The MOSEK
+Python package is installed for the certificate adapter, but a valid MOSEK
+license is still required to solve with it. If MOSEK cannot run, `TradePlanner`
+falls back to CLARABEL and marks its infeasibility-dual ranking as lower
+confidence.
 
 ## Production Context Flow
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .constraints import ConstraintPlugin, default_constraints
 from .costs import CompositeCostModel, LinearBpsCost, QuadraticParticipationImpact
@@ -18,7 +19,7 @@ class TradePlannerConfig:
     constraints: tuple[ConstraintPlugin, ...] = default_constraints()
     residual_risk_weight: float = 1.0
     terminal_penalty: float | None = None
-    solver: str = "OSQP"
+    solver: Any = "OSQP"
 
 
 def default_earnings_aware_config() -> TradePlannerConfig:

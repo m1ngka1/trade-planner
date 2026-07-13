@@ -10,5 +10,8 @@ dependencies = [
     "pandas",
 ]
 
+[project.optional-dependencies]
+mosek = ["mosek>=11,<12"]
+
 [tool.setuptools]
 packages = ["trade_planner"]

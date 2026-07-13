@@ -13,9 +13,12 @@ from .constraints import (
     OptimizationState,
     ParticipationCapacityConstraint,
     ZeroTargetConstraint,
+    VariableDiagnostics,
     default_constraints,
     get_constraint_diagnostics,
+    get_variable_diagnostics,
     with_diagnostics,
+    with_variable_diagnostics,
 )
 from .context import PlannerContext, days_to_next_event
 from .costs import CompositeCostModel, EarningsLinearPenalty, LinearBpsCost, QuadraticParticipationImpact
@@ -33,6 +36,7 @@ from .data import (
     normalize_orders,
 )
 from .diagnostics import diagnose_infeasible_problem, diagnose_problem, format_diagnosis, format_infeasibility_diagnosis
+from .mosek_diagnostics import DiagnosticMOSEK
 from .participation import (
     AnnouncementParticipationCurve,
     AnnouncementParticipationModifier,
@@ -58,6 +62,7 @@ __all__ = [
     "CompositeCostModel",
     "ConstraintDiagnostics",
     "ConstraintPlugin",
+    "DiagnosticMOSEK",
     "DailyGrossNotionalLimit",
     "DailyNetNotionalLimit",
     "DirectionConstraint",
@@ -83,6 +88,7 @@ __all__ = [
     "TradePlanner",
     "TradePlannerConfig",
     "TradePlannerResult",
+    "VariableDiagnostics",
     "ZeroTargetConstraint",
     "align_date_symbol_field",
     "align_factor_covariance",
@@ -100,7 +106,9 @@ __all__ = [
     "format_diagnosis",
     "format_infeasibility_diagnosis",
     "get_constraint_diagnostics",
+    "get_variable_diagnostics",
     "normalize_orders",
     "with_diagnostics",
+    "with_variable_diagnostics",
     "announcement_participation_rates",
 ]

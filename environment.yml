@@ -15,3 +15,4 @@ dependencies:
   - pip
   - pip:
       - -e .
+      - mosek>=11,<12

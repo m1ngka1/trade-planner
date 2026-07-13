@@ -9,9 +9,10 @@ import numpy as np
 import pandas as pd
 
 from .config import TradePlannerConfig
-from .constraints import OptimizationState
+from .constraints import OptimizationState, VariableDiagnostics, with_variable_diagnostics
 from .context import PlannerContext
 from .diagnostics import diagnose_problem
+from .mosek_diagnostics import diagnostic_mosek_if_requested
 from .types import Array, InfeasiblePlanError
 
 
@@ -34,7 +35,18 @@ class TradePlanner:
         target = ctx.orders["target_shares"].reindex(symbols).to_numpy(float)
         caps = self.config.participation_model.caps(ctx)
 
-        trades = cp.Variable((t_count, n_names))
+        trades = with_variable_diagnostics(
+            cp.Variable((t_count, n_names), name="trade_shares"),
+            VariableDiagnostics(
+                name="trade shares",
+                description="Signed shares scheduled for each date and symbol.",
+                units="shares",
+                axis_labels={
+                    "date": tuple(str(date.date()) for date in ctx.dates),
+                    "symbol": tuple(ctx.symbols),
+                },
+            ),
+        )
         state = self._build_state(trades=trades, target=target, caps=caps, ctx=ctx)
 
         constraints = []
@@ -106,11 +118,14 @@ class TradePlanner:
 
     def _solve_problem(self, problem: cp.Problem) -> None:
         try:
-            problem.solve(solver=self.config.solver, warm_start=True)
+            problem.solve(
+                solver=diagnostic_mosek_if_requested(self.config.solver),
+                warm_start=True,
+            )
         except cp.SolverError:
             problem.solve(solver="CLARABEL", warm_start=True)
         if problem.status not in {"optimal", "optimal_inaccurate"}:
-            diagnostics = diagnose_problem(problem, verify_bottlenecks=False)
+            diagnostics = diagnose_problem(problem)
             message = diagnostics.get("summary", {}).get("message") or "Optimization did not solve."
             raise InfeasiblePlanError(
                 f"Optimization failed with status {problem.status}: {message}",
