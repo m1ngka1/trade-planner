@@ -76,6 +76,9 @@ parent orders, regular participation rates, and each name's next announcement
 date through the data provider; they do not provide 2,000 separate
 pre-announcement completion percentages.
 
+For a plain-language walkthrough with worked Stock A/Stock B and long/short
+examples, see [Adaptive announcement participation model](docs/participation_model.md).
+
 For name `i`, the model first calculates the unavoidable pre-event shares:
 
 ```text
