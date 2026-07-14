@@ -43,6 +43,24 @@ class MyConstraint:
         return [...]
 ```
 
+A validator that needs to normalize the planning order may return a replacement
+signed target array. The planner rebuilds `state` immediately so every later
+validator, constraint, and objective expression sees those same values.
+
+The built-in `HardCompletionConstraint` uses this preflight step to keep large
+baskets operational. If a signed target is larger than its total horizon
+capacity, the planner caps that target to the available shares and continues
+instead of raising `InfeasiblePlanError`. One aggregated `UserWarning` lists
+every affected symbol's original target, signed capped target, and absolute
+share shortfall. The input `ctx.orders` remains unchanged; only the target used
+for that plan is capped.
+
+To print and assert the exact warning format with an oversized buy and sell:
+
+```bash
+python -m examples.hard_completion_warning
+```
+
 Then wire it through config:
 
 ```python

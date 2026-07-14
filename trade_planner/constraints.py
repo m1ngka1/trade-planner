@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol
+import warnings
 import weakref
+from typing import Any, Mapping, Protocol
 
 import cvxpy as cp
 import numpy as np
 import pandas as pd
 
 from .context import PlannerContext
-from .types import Array, InfeasiblePlanError
+from .types import Array
 
 
 @dataclass(frozen=True)
@@ -238,7 +239,7 @@ class HardCompletionConstraint:
 
     check_capacity: bool = True
 
-    def validate(self, ctx: PlannerContext, state: OptimizationState) -> None:
+    def validate(self, ctx: PlannerContext, state: OptimizationState) -> Array | None:
         if not self.check_capacity:
             return
         capacity = state.caps.sum(axis=0)
@@ -246,15 +247,31 @@ class HardCompletionConstraint:
         bad = np.flatnonzero(shortfall > 1e-8)
         if not len(bad):
             return
-        details = {
-            ctx.symbols[i]: {
-                "required_abs_shares": float(abs(state.target[i])),
-                "available_capacity": float(capacity[i]),
-                "shortfall": float(shortfall[i]),
-            }
-            for i in bad
-        }
-        raise InfeasiblePlanError(f"Insufficient capacity for hard completion: {details}")
+
+        original_targets = state.target[bad].copy()
+        capped_targets = np.sign(original_targets) * capacity[bad]
+        adjusted_target = state.target.copy()
+        adjusted_target[bad] = capped_targets
+
+        adjustments = [
+            (
+                f"{ctx.symbols[i]}: original_target_shares={original:g}, "
+                f"capped_target_shares={capped:g}, shortfall_shares={gap:g}"
+            )
+            for i, original, capped, gap in zip(
+                bad,
+                original_targets,
+                capped_targets,
+                shortfall[bad],
+            )
+        ]
+        warnings.warn(
+            f"HardCompletionConstraint capped {len(bad)} target(s) to available horizon capacity; "
+            "planning will continue.\n" + "\n".join(adjustments),
+            UserWarning,
+            stacklevel=3,
+        )
+        return adjusted_target
 
     def constraints(self, ctx: PlannerContext, state: OptimizationState) -> list[cp.Constraint]:
         total_capacity = np.sum(state.caps, axis=0)

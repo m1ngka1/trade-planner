@@ -49,11 +49,23 @@ class TradePlanner:
         )
         state = self._build_state(trades=trades, target=target, caps=caps, ctx=ctx)
 
-        constraints = []
+        # A validator may return a normalized target. Rebuild immediately so
+        # later validators and all CVXPY expressions see the same values.
         for plugin in self.config.constraints:
             validate = getattr(plugin, "validate", None)
             if callable(validate):
-                validate(ctx, state)
+                adjusted_target = validate(ctx, state)
+                if adjusted_target is not None:
+                    target = np.asarray(adjusted_target, dtype=float).copy()
+                    if target.shape != (n_names,):
+                        raise ValueError(
+                            f"{type(plugin).__name__}.validate returned target shape {target.shape}; "
+                            f"expected {(n_names,)}"
+                        )
+                    state = self._build_state(trades=trades, target=target, caps=caps, ctx=ctx)
+
+        constraints = []
+        for plugin in self.config.constraints:
             constraints.extend(plugin.constraints(ctx, state))
 
         objective_terms = self._objective_terms(ctx, state)

@@ -266,6 +266,57 @@ class ConstraintDiagnosticsTests(unittest.TestCase):
         self.assertEqual(context["capacity_shortfall_shares"], 80.0)
         self.assertIn("add at least 80 shares", context["pm_action"])
 
+    def test_hard_completion_caps_unavailable_buy_and_sell_targets_with_warning(self) -> None:
+        ctx = _context(targets=[100.0, -50.0], base_participation=0.1)
+        trades = cp.Variable((len(ctx.dates), len(ctx.symbols)))
+        caps = ParticipationCapModel().caps(ctx)
+        target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+        state = TradePlanner._build_state(trades=trades, target=target, caps=caps, ctx=ctx)
+
+        with self.assertWarns(UserWarning) as caught:
+            adjusted_target = HardCompletionConstraint().validate(ctx, state)
+
+        np.testing.assert_allclose(adjusted_target, [20.0, -20.0])
+        np.testing.assert_allclose(state.target, [100.0, -50.0])
+        np.testing.assert_allclose(ctx.orders["target_shares"], [100.0, -50.0])
+        message = str(caught.warning)
+        self.assertIn("capped 2 target(s)", message)
+        self.assertIn(
+            "AAA: original_target_shares=100, capped_target_shares=20, shortfall_shares=80",
+            message,
+        )
+        self.assertIn(
+            "BBB: original_target_shares=-50, capped_target_shares=-20, shortfall_shares=30",
+            message,
+        )
+
+    def test_planner_rebuilds_residuals_after_hard_completion_caps_targets(self) -> None:
+        class TerminalResidualConstraint:
+            def constraints(self, ctx, state):
+                return [state.terminal_residual == 0]
+
+        ctx = _context(targets=[100.0, -50.0], base_participation=0.1)
+        config = TradePlannerConfig(
+            participation_model=ParticipationCapModel(),
+            risk_model=StaticCovarianceRiskModel(),
+            cost_model=CompositeCostModel(terms=()),
+            constraints=(
+                ParticipationCapacityConstraint(),
+                DirectionConstraint(),
+                HardCompletionConstraint(),
+                TerminalResidualConstraint(),
+            ),
+            solver=_solver(),
+        )
+
+        with self.assertWarns(UserWarning):
+            result = TradePlanner(config).solve(ctx)
+
+        traded = result.schedule.groupby("symbol")["trade_shares"].sum().reindex(ctx.symbols)
+        np.testing.assert_allclose(traded, [20.0, -20.0], atol=1e-6)
+        self.assertLess(result.diagnostics["max_abs_terminal_residual"], 1e-6)
+        np.testing.assert_allclose(ctx.orders["target_shares"], [100.0, -50.0])
+
     def test_multiple_conflicts_are_reported_as_certificate_members_not_single_fix(self) -> None:
         x = cp.Variable(name="x")
         y = cp.Variable(name="y")
