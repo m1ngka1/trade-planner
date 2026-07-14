@@ -28,7 +28,12 @@ class OptimizationState:
 
 @dataclass(frozen=True)
 class ConstraintDiagnostics:
-    """User-facing diagnostics owned by a high-level planner constraint."""
+    """User-facing diagnostics owned by a high-level planner constraint.
+
+    New constraint plugins should define their explanation here when creating
+    the CVXPY constraint.  Keeping metadata beside the business rule lets the
+    generic diagnostic layer stay small and avoids a separate name registry.
+    """
 
     name: str
     group: str = ""

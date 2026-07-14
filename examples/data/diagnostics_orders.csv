@@ -1,0 +1,4 @@
+symbol,target_shares,price,adv_shares
+AAA,100,10,1000
+BBB,-80,20,800
+CCC,60,25,600

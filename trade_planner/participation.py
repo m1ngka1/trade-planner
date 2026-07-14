@@ -1,4 +1,12 @@
-"""Participation cap models and cap modifiers."""
+"""Participation cap models and cap modifiers.
+
+Reader's map: :class:`ParticipationCapModel` converts rate x ADV into the final
+share-cap matrix consumed by the optimizer.  Modifiers reshape that envelope;
+they never choose the actual trades.  Start with
+:meth:`AdaptiveAnnouncementParticipation.multiplier` for the data-driven event
+policy, then read ``_balanced_pre_budgets`` and ``_weighted_capped_allocation``
+for its portfolio- and date-level allocation steps.
+"""
 
 from __future__ import annotations
 
@@ -84,6 +92,9 @@ class AdaptiveAnnouncementParticipation:
         event_days = ctx.event_days.to_numpy(float)
         multipliers = np.ones_like(base_caps)
 
+        # Phase 1: collect per-name feasibility facts.  ``mandatory`` is the
+        # amount that cannot fit after the announcement, not an instruction to
+        # trade that amount immediately.
         mandatory = np.zeros_like(targets)
         max_pre_capacity = np.zeros_like(targets)
         safe_name_priority = np.ones_like(targets)
@@ -110,6 +121,9 @@ class AdaptiveAnnouncementParticipation:
             if np.sum(pre_capacity) > 0:
                 safe_name_priority[column] = float(np.average(priority, weights=pre_capacity))
 
+        # Phase 2: turn the mandatory floors into pre-event cap budgets.  The
+        # optional allowance is deliberately small and may be side-balanced;
+        # CVXPY can still choose to trade less than these caps.
         if self.balance_sides:
             pre_budgets = self._balanced_pre_budgets(
                 ctx=ctx,
@@ -126,6 +140,9 @@ class AdaptiveAnnouncementParticipation:
                 mandatory + self.pre_event_flex * discretionary,
             )
 
+        # Phase 3: spread each name's budget across its pre-event dates.  The
+        # risk weights favor dates farther from the announcement; post-event
+        # dates retain the regular participation cap.
         for column, pre_budget in enumerate(pre_budgets):
             pre_mask = pre_masks[column]
             if not np.any(pre_mask):
@@ -227,6 +244,9 @@ class AdaptiveAnnouncementParticipation:
         prices = np.asarray(ctx.price[0], dtype=float)
         signed_targets = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
         budgets = np.minimum(mandatory, max_pre_capacity)
+        # Compare long and short progress in dollars, and only include names
+        # whose horizon actually crosses an announcement.  A name whose event
+        # is after the horizon must not weaken event protection on the other side.
         active_masks = [
             mask
             for mask in (
@@ -246,6 +266,9 @@ class AdaptiveAnnouncementParticipation:
             side_stats.append((mask, total_notional, mandatory_fraction, max_fraction))
 
         if len(side_stats) == 2:
+            # Seek one feasible pre-event completion fraction for both sides:
+            # never below either side's mandatory floor or above either side's
+            # available capacity.
             common_floor = max(item[2] for item in side_stats)
             common_ceiling = min(item[3] for item in side_stats)
             desired_common = common_floor + self.pre_event_flex * (1.0 - common_floor)
@@ -254,6 +277,8 @@ class AdaptiveAnnouncementParticipation:
             mandatory_fraction = side_stats[0][2]
             desired_common = mandatory_fraction + self.pre_event_flex * (1.0 - mandatory_fraction)
 
+        # Allocate only the optional notional here.  Each name keeps its
+        # feasibility-driven mandatory amount regardless of side balancing.
         for mask, total_notional, mandatory_fraction, max_fraction in side_stats:
             desired_fraction = min(max(mandatory_fraction, desired_common), max_fraction)
             indices = np.flatnonzero(mask)
@@ -532,7 +557,7 @@ def _weighted_capped_allocation(
     capacity: np.ndarray,
     priority: np.ndarray,
 ) -> np.ndarray:
-    """Water-fill a scalar budget by priority without exceeding capacities."""
+    """Water-fill a budget toward high-priority buckets, respecting each cap."""
     capacity = np.maximum(np.asarray(capacity, dtype=float), 0.0)
     if total <= 0 or not np.any(capacity > 0):
         return np.zeros_like(capacity)

@@ -140,6 +140,9 @@ python experiments/participation_refinement.py
 
 ## CVXPY Model Diagnostics
 
+For a worked three-name example with a real CLARABEL failure and a transparent
+certificate stand-in, see [Diagnostics walkthrough](docs/diagnostics_example.md).
+
 Attach domain meaning directly to each CVXPY constraint with
 `with_diagnostics(...)`, solve the problem, then inspect it:
 

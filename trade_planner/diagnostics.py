@@ -1,4 +1,12 @@
-"""Single-solve diagnostics for solved CVXPY problem objects."""
+"""Single-solve diagnostics for solved CVXPY problem objects.
+
+Reader's map: constraint plugins attach business meaning with
+``with_diagnostics`` in :mod:`trade_planner.constraints`; the planner solves the
+original model once; :func:`diagnose_problem` maps evidence from that same
+problem back to those labels; and :func:`format_diagnosis` produces the concise
+PM-facing explanation.  MOSEK-specific evidence capture is isolated in
+``mosek_diagnostics.py`` so the public report shape remains solver-independent.
+"""
 
 from __future__ import annotations
 
@@ -41,12 +49,17 @@ def diagnose_problem(
     if initial_status is None and solve_if_needed:
         solve_error = _solve_original(problem, solver, solve_kwargs)
 
+    # 1. Snapshot the original CVXPY objects and their attached business
+    # metadata.  This layer is useful with every solver, even without a native
+    # infeasibility certificate.
     status_family = _status_family(problem.status)
     constraints = [
         _inspect_constraint(index, constraint, tol)
         for index, constraint in enumerate(problem.constraints)
     ]
     variables = [_inspect_variable(variable) for variable in problem.variables()]
+    # 2. Decode evidence already produced by the solve.  Diagnostics do not
+    # disable constraints, build a relaxed model, or run an ablation loop.
     solver_evidence = _solver_evidence(
         problem,
         constraints,
@@ -59,6 +72,8 @@ def diagnose_problem(
     decision = _decision(status_family, bottlenecks, improving_direction, solver_evidence)
     recommendations = _recommendations(status_family, decision, solver_evidence)
 
+    # 3. Keep both machine-readable rows and a short human-readable decision so
+    # callers can log, render, or programmatically inspect the same report.
     report: dict[str, Any] = {
         "summary": {
             "status": problem.status,
@@ -266,6 +281,9 @@ def _solver_evidence(
     relative_tol: float,
     top_elements: int,
 ) -> dict[str, Any]:
+    # ``extra_stats`` is the bridge from solver-native output to original
+    # CVXPY constraint IDs.  Once mapped, constraint-owned metadata supplies
+    # names, locations, current settings, causes, and practical actions.
     extra = _extra_stats(problem)
     native = extra.get("MOSEK_DIAGNOSTICS") if isinstance(extra.get("MOSEK_DIAGNOSTICS"), Mapping) else {}
     certificate = next(
@@ -281,6 +299,8 @@ def _solver_evidence(
     confidence = "solver_certificate" if certificate is not None else "none"
 
     if certificate is None and status_family in {"infeasible", "infeasible_inaccurate"}:
+        # Some backends expose mapped values only as constraint duals.  Treat
+        # this as weaker fallback evidence, not as a solver-certified IIS.
         fallback = {
             constraint.id: constraint.dual_value
             for constraint in problem.constraints
@@ -306,6 +326,9 @@ def _solver_evidence(
     directions = _map_variable_ray(ray, problem.variables(), relative_tol, top_elements)
 
     if status_family in {"solved", "solved_inaccurate"} and not members:
+        # On a successful solve, active duals describe sensitivity.  They are
+        # intentionally labelled as such and must not be reported as causes of
+        # infeasibility.
         duals = {
             constraint.id: constraint.dual_value
             for constraint, row in zip(problem.constraints, constraints)
@@ -345,6 +368,9 @@ def _map_constraint_certificate(
     relative_tol: float,
     top_elements: int,
 ) -> list[dict[str, Any]]:
+    # Certificate scale is arbitrary, so ranking uses relative magnitude and
+    # reports conflict-set participation rather than claiming the top row alone
+    # is the unique cause or fix.
     by_id = {row["constraint_id"]: (row, original_constraints[row["cvxpy_index"]]) for row in rows}
     prepared: list[tuple[dict[str, Any], cp.Constraint, np.ndarray]] = []
     global_max = 0.0

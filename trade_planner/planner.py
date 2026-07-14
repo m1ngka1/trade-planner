@@ -157,6 +157,9 @@ class TradePlanner:
         except cp.SolverError:
             problem.solve(solver="CLARABEL", warm_start=True)
         if problem.status not in {"optimal", "optimal_inaccurate"}:
+            # Diagnose this exact solved object.  The report consumes attached
+            # constraint metadata and existing solver evidence; it does not
+            # relax the model or launch a second diagnostic solve.
             diagnostics = diagnose_problem(problem)
             message = diagnostics.get("summary", {}).get("message") or "Optimization did not solve."
             raise InfeasiblePlanError(
