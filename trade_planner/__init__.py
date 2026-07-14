@@ -1,5 +1,6 @@
 """Pluggable daily basket execution planner."""
 
+from .analytics import cumulative_side_completion
 from .config import TradePlannerConfig, default_earnings_aware_config
 from .constraints import (
     ConstraintDiagnostics,
@@ -38,6 +39,7 @@ from .data import (
 from .diagnostics import diagnose_infeasible_problem, diagnose_problem, format_diagnosis, format_infeasibility_diagnosis
 from .mosek_diagnostics import DiagnosticMOSEK
 from .participation import (
+    AdaptiveAnnouncementParticipation,
     AnnouncementParticipationCurve,
     AnnouncementParticipationModifier,
     LogisticEarningsParticipation,
@@ -56,6 +58,7 @@ from .risk import (
 from .types import InfeasiblePlanError
 
 __all__ = [
+    "AdaptiveAnnouncementParticipation",
     "BarraFactorRiskModel",
     "AnnouncementParticipationCurve",
     "AnnouncementParticipationModifier",
@@ -98,6 +101,7 @@ __all__ = [
     "build_market_panel_from_provider",
     "build_planner_dates",
     "build_context_from_provider",
+    "cumulative_side_completion",
     "days_to_next_event",
     "default_constraints",
     "default_earnings_aware_config",

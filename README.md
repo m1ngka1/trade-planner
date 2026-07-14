@@ -71,36 +71,68 @@ python -m trade_planner.examples
 
 ## Announcement Participation Rates
 
-Use `AnnouncementParticipationCurve` when the announcement date is known and
-the planning horizon spans both sides of it. The announcement date itself stays
-at the cautious pre-event rate; the higher rate begins the following day.
+The default config uses `AdaptiveAnnouncementParticipation`. Users provide the
+parent orders, regular participation rates, and each name's next announcement
+date through the data provider; they do not provide 2,000 separate
+pre-announcement completion percentages.
 
-```python
-import pandas as pd
-from trade_planner import AnnouncementParticipationCurve
+For name `i`, the model first calculates the unavoidable pre-event shares:
 
-dates = pd.date_range("2026-07-01", periods=15, freq="D")
-rates = AnnouncementParticipationCurve(
-    pre_rate=0.025,
-    post_rate=0.15,
-).rates(dates, announcement_date=dates[9])
-
-assert rates.iloc[4] == 0.025   # Day 5
-assert rates.iloc[9] == 0.025   # Day 10 / announcement
-assert rates.iloc[11] == 0.15   # Day 12
+```text
+mandatory_pre_i = max(abs(target_i) - regular_post_event_capacity_i, 0)
 ```
 
-Set `transition="logistic"` for a smooth post-announcement ramp. Optional
-`pre_volatility_sensitivity` and `post_volatility_sensitivity` apply inverse
-volatility scaling: higher volatility reduces the rate and falling volatility
-raises it. Inputs may be NumPy arrays or pandas Series. To use absolute event
-rates inside the planner, add `AnnouncementParticipationModifier` to
-`ParticipationCapModel`; modifiers may exceed 1x so a 2.5% base can become 15%.
+It then:
 
-Run the complete example with:
+1. adds a small portfolio-level flexibility allowance (5% by default);
+2. aligns long and short pre-event capacity fractions for names whose planning
+   horizons cross an announcement, when feasible;
+3. gives that optional capacity to names with safer pre-event dates; and
+4. water-fills each name toward dates farther from the announcement.
+
+The announcement date gets the lowest weight. The regular participation cap
+resumes on the next planner date. This makes the inferred pre-event fraction
+different for every name based on target size, ADV, available post-event days,
+side balance, and event timing.
+
+```python
+from trade_planner import AdaptiveAnnouncementParticipation, ParticipationCapModel
+
+policy = AdaptiveAnnouncementParticipation(
+    pre_event_flex=0.05,  # one portfolio policy, not one input per name
+    balance_sides=True,
+)
+model = ParticipationCapModel(modifiers=(policy,))
+summary = policy.allocation_summary(ctx)
+
+print(summary[[
+    "side",
+    "mandatory_pre_fraction",
+    "pre_event_cap_fraction",
+    "max_pre_participation_rate",
+    "max_post_participation_rate",
+]])
+```
+
+`AnnouncementParticipationCurve` and `AnnouncementParticipationModifier` remain
+available when a desk intentionally wants one fixed pre/post ADV-rate policy.
+They are no longer the adaptive default.
+
+After solving, inspect gross-notional pacing with start-date prices so terminal
+completion is exactly 100% on both sides:
+
+```python
+from trade_planner import cumulative_side_completion
+
+completion = cumulative_side_completion(ctx, result.schedule)
+print(completion[["cumulative_long_pct", "cumulative_short_pct", "long_short_gap_pp"]])
+```
+
+Run the fixed-policy example and the reproducible model comparison with:
 
 ```bash
 python -m examples.announcement_participation
+python experiments/participation_refinement.py
 ```
 
 ## CVXPY Model Diagnostics
@@ -188,7 +220,10 @@ ECOS, SCS, CLARABEL, and OSQP are included as license-free fallbacks. The MOSEK
 Python package is installed for the certificate adapter, but a valid MOSEK
 license is still required to solve with it. If MOSEK cannot run, `TradePlanner`
 falls back to CLARABEL and marks its infeasibility-dual ranking as lower
-confidence.
+confidence. The default config now requests CLARABEL. The adaptive participation
+policy itself is NumPy-only, and the planner applies a positive objective-scale
+normalization so changing supported CVXPY backends does not change model
+trade-offs.
 
 ## Production Context Flow
 
@@ -329,20 +364,22 @@ With earnings/event risk overlays, the specific variance becomes:
 \sigma^2_{\mathrm{event},i}\exp(-d_{i,t}/\tau),
 ```
 
-where `d_{i,t}` is days to next earnings/event. Participation caps can also be
-made event-aware, for example:
+where `d_{i,t}` is days to next earnings/event. The adaptive participation
+policy starts from the minimum pre-event requirement:
 
 ```math
-\rho_{i,t}
+B_i^{mandatory}
 =
-\rho_i^{base}
-\left[
-h_{min}
-+
-(1-h_{min})
-\frac{1}{1+\exp(-k(d_{i,t}-d_0))}
-\right].
+\max\left(
+|q_i| - \sum_{t > event_i}\rho^{base}_{i,t}ADV_{i,t}m_{i,t},
+0
+\right).
 ```
+
+The portfolio-level flexibility and side-balance step determines a pre-event
+capacity budget at least this large. A bounded water-fill distributes that
+budget using a monotone distance weight, with the smallest weight on the
+announcement date and the regular cap restored after the event.
 
 ## Barra-Style Residual Risk
 

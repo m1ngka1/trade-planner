@@ -65,7 +65,13 @@ class TradePlanner:
         for term in objective_terms:
             total_objective = total_objective + term
 
-        problem = cp.Problem(cp.Minimize(total_objective), constraints)
+        objective_multiplier = self._objective_multiplier(
+            total_objective=total_objective,
+            trades=trades,
+            target=target,
+            caps=caps,
+        )
+        problem = cp.Problem(cp.Minimize(objective_multiplier * total_objective), constraints)
         self._solve_problem(problem)
 
         trade_values = np.asarray(trades.value, dtype=float)
@@ -74,10 +80,36 @@ class TradePlanner:
 
         diagnostics = {
             "status": problem.status,
-            "objective": float(problem.value),
+            "objective": float(total_objective.value),
             "max_abs_terminal_residual": float(np.max(np.abs(residual_after[-1]))),
         }
         return TradePlannerResult(schedule=schedule, diagnostics=diagnostics)
+
+    @staticmethod
+    def _objective_multiplier(
+        total_objective: cp.Expression | float,
+        trades: cp.Variable,
+        target: Array,
+        caps: Array,
+    ) -> float:
+        """Numerically normalize the objective without changing its optimum."""
+        if not isinstance(total_objective, cp.Expression):
+            return 1.0
+        total_capacity = np.sum(caps, axis=0)
+        reference = np.divide(
+            caps,
+            total_capacity[None, :],
+            out=np.zeros_like(caps),
+            where=total_capacity[None, :] > 0,
+        ) * target[None, :]
+        trades.value = reference
+        reference_value = total_objective.value
+        if reference_value is None or not np.isfinite(reference_value) or reference_value <= 0:
+            return 1.0
+        # Keep typical objective magnitudes in a range that works well across
+        # open-source QP and conic backends. This is a positive scalar only;
+        # risk/cost trade-offs and the optimizer's solution are unchanged.
+        return 1_000_000.0 / max(float(reference_value), 1_000_000.0)
 
     @staticmethod
     def _build_state(

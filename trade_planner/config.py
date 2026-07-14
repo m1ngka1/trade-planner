@@ -7,7 +7,7 @@ from typing import Any
 
 from .constraints import ConstraintPlugin, default_constraints
 from .costs import CompositeCostModel, LinearBpsCost, QuadraticParticipationImpact
-from .participation import LogisticEarningsParticipation, ParticipationCapModel
+from .participation import AdaptiveAnnouncementParticipation, ParticipationCapModel
 from .risk import BarraFactorRiskModel, ExponentialEarningsRiskOverlay, RiskModel
 
 
@@ -27,11 +27,7 @@ def default_earnings_aware_config() -> TradePlannerConfig:
     return TradePlannerConfig(
         participation_model=ParticipationCapModel(
             modifiers=[
-                LogisticEarningsParticipation(
-                    h_min=0.25,
-                    midpoint_days=5.0,
-                    steepness=1.0,
-                )
+                AdaptiveAnnouncementParticipation()
             ]
         ),
         risk_model=BarraFactorRiskModel(
@@ -51,5 +47,5 @@ def default_earnings_aware_config() -> TradePlannerConfig:
         constraints=default_constraints(),
         residual_risk_weight=1.0,
         terminal_penalty=None,
-        solver="OSQP",
+        solver="CLARABEL",
     )
