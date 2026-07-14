@@ -1,4 +1,16 @@
-"""A CVXPY MOSEK adapter that preserves one-solve certificate evidence."""
+"""Preserve MOSEK certificate evidence that CVXPY normally discards.
+
+The control flow is intentionally split in two:
+
+1. :class:`DiagnosticMOSEK` runs as the solver and stores evidence on the
+   returned CVXPY ``Solution.extra_stats``.
+2. ``diagnostics.py`` runs *after* the solve and converts that evidence into
+   constraint names, date/symbol labels, current settings, and PM actions.
+
+Keeping the native ``Task`` handling here is important: CVXPY closes the Task
+inside its MOSEK ``invert`` step, so the native arrays must be copied before
+calling ``super().invert(...)``.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +43,8 @@ class DiagnosticMOSEK(MOSEK):
         solver_opts: Mapping[str, Any],
         solver_cache: Any = None,
     ) -> Any:
+        # Let CVXPY build and optimize its normal MOSEK Task. We do not build a
+        # relaxed model and we do not run an additional diagnostic solve.
         try:
             output = super().solve_via_data(data, warm_start, verbose, solver_opts, solver_cache)
         except Exception as exc:
@@ -39,10 +53,14 @@ class DiagnosticMOSEK(MOSEK):
                 raise SolverError(f"MOSEK could not run: {exc}") from exc
             raise
         if isinstance(output, dict) and "task" in output:
+            # Save the canonical variable layout next to the live Task. It is
+            # needed later to split a flat MOSEK ray back into CVXPY variables.
             output["trade_planner_context"] = _canonical_context(data)
         return output
 
     def invert(self, solver_output: Any, inverse_data: Any) -> Any:
+        # Snapshot first. MOSEK.invert calls Task.__exit__, after which gety,
+        # getslc, getsuc, getslx, etc. can no longer be queried.
         native: dict[str, Any] = {}
         if isinstance(solver_output, Mapping) and "task" in solver_output:
             native = _snapshot_task(
@@ -51,12 +69,16 @@ class DiagnosticMOSEK(MOSEK):
                 solver_output.get("trade_planner_context") or {},
             )
 
+        # CVXPY's standard inversion performs the important original-space
+        # mapping for primal infeasibility and writes it to extra_stats["IIS"].
         solution = super().invert(solver_output, inverse_data)
         if not native:
             return solution
 
         extra = dict(solution.attr.get(s.EXTRA_STATS) or {})
         ray = native.pop("original_variable_ray", None)
+        # diagnostics.py consumes only these structured extra_stats fields; it
+        # never needs the native Task itself and therefore never solves again.
         extra["MOSEK_DIAGNOSTICS"] = native
         if ray:
             extra["DUAL_RAY"] = ray
@@ -72,6 +94,7 @@ def diagnostic_mosek_if_requested(solver: Any) -> Any:
 
 
 def _canonical_context(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Remember how CVXPY packed named variables into its canonical vector."""
     param_problem = data.get(s.PARAM_PROB)
     variables: list[dict[str, Any]] = []
     if param_problem is not None:
@@ -89,6 +112,9 @@ def _canonical_context(data: Mapping[str, Any]) -> dict[str, Any]:
                     "shape": tuple(variable.shape),
                 }
             )
+    # For CVXPY's continuous MOSEK reduction, B is the objective vector of the
+    # original canonical minimization problem. Its dot product with the ray
+    # must be negative before we call that ray an improving direction.
     objective = np.asarray(data.get(s.B, ()), dtype=float).ravel()
     return {
         "dualized": bool(data.get("dualized")),
@@ -98,6 +124,7 @@ def _canonical_context(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _snapshot_task(task: Any, solver_options: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy statuses and certificates from the still-live native MOSEK Task."""
     import mosek
 
     solution_type = _solution_type(task, solver_options, mosek)
@@ -122,6 +149,9 @@ def _snapshot_task(task: Any, solver_options: Mapping[str, Any], context: Mappin
         ),
     }
 
+    # CVXPY dualizes continuous models. Therefore a primal-infeasible *MOSEK
+    # canonical task* means the original CVXPY problem is unbounded. MOSEK's y
+    # vector is the corresponding direction in the original canonical x-space.
     if bool(context.get("dualized")) and problem_status == mosek.prosta.prim_infeas:
         ray_vector = _task_vector(task, "gety", solution_type)
         if ray_vector is not None:
@@ -132,6 +162,8 @@ def _snapshot_task(task: Any, solver_options: Mapping[str, Any], context: Mappin
                 normalized = slope / denominator if denominator > np.finfo(float).tiny else 0.0
                 result["objective_slope"] = slope
                 result["objective_slope_normalized"] = normalized
+                # Reject numerically dubious rays instead of presenting a PM
+                # action unless the direction genuinely improves minimization.
                 result["objective_improves"] = normalized < -1e-8
             if result.get("objective_improves"):
                 result["original_variable_ray"] = _split_variable_vector(
@@ -144,6 +176,7 @@ def _snapshot_task(task: Any, solver_options: Mapping[str, Any], context: Mappin
 
 
 def _solution_type(task: Any, solver_options: Mapping[str, Any], mosek: Any) -> Any:
+    """Select the same MOSEK solution slot that CVXPY will subsequently read."""
     if task.getnumintvar() > 0:
         return mosek.soltype.itg
     simplex = {mosek.optimizertype.primal_simplex, mosek.optimizertype.dual_simplex}
@@ -178,6 +211,7 @@ def _solution_quality(task: Any, solution_type: Any) -> dict[str, float]:
 
 
 def _task_vector(task: Any, method: str, solution_type: Any) -> np.ndarray | None:
+    """Read an optional Task vector without making diagnostics fail the solve."""
     try:
         value = getattr(task, method)(solution_type)
     except Exception:
@@ -195,7 +229,15 @@ def _certificate_activity(
     problem_status: Any,
     mosek: Any,
 ) -> dict[str, Any]:
-    """Summarize the same native certificate arrays used by MOSEK's report."""
+    """Summarize the same native certificate arrays used by MOSEK's report.
+
+    ``slc/suc`` are lower/upper multipliers for constraint bounds and
+    ``slx/sux`` are lower/upper multipliers for variable bounds. These indices
+    describe CVXPY's canonical MOSEK task, so they are retained as native audit
+    evidence. The PM-facing original-constraint mapping comes from CVXPY's
+    ``extra_stats["IIS"]`` instead of pretending these canonical indices are
+    original constraint IDs.
+    """
     methods = (
         ("constraint_lower", "getslc"),
         ("constraint_upper", "getsuc"),
@@ -209,6 +251,8 @@ def _certificate_activity(
         for label, method in methods
         if (vector := _task_vector(task, method, solution_type)) is not None
     }
+    # Certificates can be multiplied by any positive constant. Use a relative
+    # threshold so the summary does not depend on their arbitrary scale.
     scale = max(
         (float(np.max(np.abs(vector[np.isfinite(vector)]))) for vector in vectors.values()),
         default=0.0,
@@ -231,6 +275,7 @@ def _certificate_activity(
 
 
 def _split_variable_vector(vector: np.ndarray, variables: Any) -> dict[int, Any]:
+    """Split a flat canonical ray into arrays keyed by CVXPY variable ID."""
     result: dict[int, Any] = {}
     for variable in variables:
         start = int(variable["offset"])
@@ -240,6 +285,7 @@ def _split_variable_vector(vector: np.ndarray, variables: Any) -> dict[int, Any]
         value = vector[start:stop]
         shape = tuple(variable.get("shape") or ())
         if shape:
+            # CVXPY vectorizes matrix variables in Fortran/column-major order.
             value = value.reshape(shape, order="F")
         elif value.size == 1:
             value = value.item()
@@ -248,6 +294,7 @@ def _split_variable_vector(vector: np.ndarray, variables: Any) -> dict[int, Any]
 
 
 def _interpretation(problem_status: Any, context: Mapping[str, Any], mosek: Any) -> str:
+    """Explain the status flip caused by CVXPY's continuous dualization."""
     if not context.get("dualized"):
         return "The MOSEK status describes the original task directly."
     if problem_status == mosek.prosta.dual_infeas:
