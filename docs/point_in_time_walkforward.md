@@ -169,6 +169,110 @@ absorbed more forecast noise than the proposed statistical rule. All three
 variants are recorded as inconclusive/redundant, the production selector is
 unchanged, and the chronological holdout remains unopened.
 
+### Idea 4: receding-horizon execution
+
+The next hypothesis replaced the one-snapshot plan with model-predictive
+execution. The optimizer still chooses every trade: on each morning the
+experiment observes a new point-in-time forecast vintage, solves the remaining
+order's medium-risk economic frontier, executes only that day's slice, and
+rolls the actual remaining shares forward. It does not prescribe a volume
+curve, an urgent-name start date, or a small-order delay.
+
+Synthetic forecast revisions are generated from a latent alpha state only in
+the replay data-generating process. The optimizer receives the noisy vintage,
+never latent alpha or realized returns. Forecast error retains 65% per day and
+converges toward a 20% uncertainty floor. These values describe a synthetic
+information environment; production must estimate them from stored forecast
+vintages rather than expose them as user inputs.
+
+Daily fills are converted to whole shares. Rounding is constrained by today's
+participation cap, the remaining parent order, and the minimum current trade
+needed to fit within future whole-share capacity. This is the discrete version
+of the existing hard-completion constraint, not a pacing rule. A false
+infeasibility from one numerical backend triggers the other backend on the
+identical objective and constraints, and the coefficient audit records the
+solver actually used.
+
+Unconditional daily re-optimization failed development. Although empirical
+loss CVaR improved 2.51 bp, total P&L fell $1.114m, event volatility increased
+0.46 bp, mean within-event drawdown increased 2.77 bp, and the late/early ratio
+fell 0.149. The shrinking horizon repeatedly made near-term trading look more
+urgent and consumed the late-volume reserve. This is a structural reason not
+to deploy naïve receding-horizon control.
+
+### Idea 5: commitment-aware recourse
+
+Commitment-aware recourse compares the newly selected frontier plan with the
+active prior plan under the current forecast. A replan is accepted only if one
+of these investment cases clears an automatic basis-point materiality hurdle:
+
+```text
+profit case:
+    expected P&L gain >= hurdle
+    and forecast volatility/CVaR degradation <= hurdle
+
+defensive case:
+    forecast volatility or CVaR reduction >= hurdle
+    and expected P&L sacrifice <= hurdle
+```
+
+The hurdle is measured in basis points of remaining parent gross. It is a desk
+materiality policy, not a CVXPY coefficient and not a user-entered schedule.
+Every accepted frontier still obtains its inventory and path-risk coefficients
+automatically from the selected `medium` risk profile and the remaining
+basket's economics.
+
+| Development policy | P&L delta | Volatility delta | Loss-CVaR delta | Within-event DD delta | Factor delta | Ramp delta | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Always replan | -$1,114k | +0.464 bp | -2.508 bp | +2.767 bp | -0.019 pp | -0.149 | Discard |
+| Materiality 0.5 bp | -$449k | +0.136 bp | -2.167 bp | +0.024 bp | -0.437 pp | -0.039 | Discard |
+| Materiality 1.0 bp | -$449k | +0.161 bp | -2.225 bp | -0.110 bp | -0.438 pp | -0.032 | Discard |
+| Materiality 2.0 bp | -$242k | -0.021 bp | -4.610 bp | -0.450 bp | -0.202 pp | +0.004 | Discard |
+| Defensive-only 2.0 bp | -$242k | -0.021 bp | -4.610 bp | -0.450 bp | -0.202 pp | +0.004 | Discard: same schedule |
+| Defensive-only 4.0 bp | -$579k | +0.417 bp | -4.535 bp | +0.250 bp | -0.022 pp | +0.020 | Discard |
+
+The 2 bp schedule passed every gate except the requirement that volatility fall
+by at least 0.05 bp rather than solver/noise scale: it improved volatility by
+only 0.0207 bp. Raising the defensive hurdle to 4 bp then worsened both
+volatility and drawdown, so the near-pass was not a monotonic risk-control
+effect. The result is useful enough to retain for historical replay, but not
+strong enough to change production or open the chronological holdout. The
+current static high/medium/low policy remains the production default.
+
+### Idea 6: economically proximal recourse
+
+The next candidate moved commitment inside the optimizer. Each daily solve
+adds an economic charge for departing from the still-active schedule, so a
+forecast revision must be valuable enough to pay for changing the execution
+plan. The charge is calibrated automatically from the basket's remaining
+forecast uncertainty and the selected high/medium/low profile. The corrected
+version prices the difference between two noisy forecast vintages and applies
+a simultaneous one-sided confidence hurdle across the remaining solve dates;
+it is not a user-entered trading rule.
+
+The trade-proximal objective is an L1 charge on changed dollars. A shifted
+dollar is divided by two because moving it from one date to another appears
+once as a removal and once as an addition. The experiment still leaves all
+trade dates and quantities to the optimizer.
+
+| Development policy | P&L delta | Volatility delta | Loss-CVaR delta | Within-event DD delta | Factor delta | Ramp delta | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 95% single-comparison hurdle | -$571k | +0.269 bp | -5.581 bp | +0.069 bp | -0.554 pp | -0.013 | Discard |
+| 95% simultaneous hurdle | -$532k | +0.191 bp | -5.689 bp | +0.101 bp | -0.386 pp | -0.004 | Discard |
+
+Both versions improved empirical loss CVaR and early factor balance while
+preserving hard capacity, direction, completion, urgency, and broad volume-ramp
+gates. Neither reduced event P&L volatility; both increased within-event
+drawdown and moved one small order two days earlier. The simultaneous
+correction reduced but did not remove those failures.
+
+A quadratic inventory-path formulation was then added because an L1
+dollar-day formulation was numerically unstable. The quadratic model solved
+cleanly, but a two-event mechanical screen immediately failed P&L, volatility,
+loss-CVaR, drawdown, and rank-ramp gates. It was stopped before the 12-event
+development sweep. No proximal variant reached the chronological holdout, and
+none changes the production selector.
+
 ## Reproduce
 
 ```bash
@@ -192,13 +296,35 @@ env PYTHONPATH=. python experiments/frontier_uncertainty_selection.py \
   --n-events 12 \
   --confidences 0.60 0.75 0.90 \
   --output-prefix artifacts/frontier_uncertainty_dev
+
+env PYTHONPATH=. python experiments/rolling_horizon_walkforward.py \
+  --solver OSQP \
+  --daily-solver CLARABEL \
+  --event-start 0 \
+  --n-events 12 \
+  --replan-policy materiality \
+  --replan-threshold-bps 2.0 \
+  --output-prefix artifacts/commitment_aware_dev_200
+
+env PYTHONPATH=. python experiments/rolling_horizon_walkforward.py \
+  --solver OSQP \
+  --daily-solver OSQP \
+  --event-start 0 \
+  --n-events 12 \
+  --replan-policy proximal \
+  --proximal-basis trade \
+  --risk-aversion medium \
+  --output-prefix artifacts/proximal_rolling_dev_medium_simultaneous
 ```
 
 Each prefix produces a trial ledger, paired event deltas, summary, complete
-schedules, daily P&L, and a four-panel PNG. The hybrid confirmation prefixes are
+schedules, daily P&L, and a PNG. Rolling-horizon prefixes additionally record
+every forecast vintage, accepted/rejected replan, active and candidate risk
+coefficient, complete factor exposure path, and every acceptance gate. The
+hybrid confirmation prefixes are
 `alpha_confidence_hybrid_dev_*` and `uncertainty_budget_hybrid_dev_*`.
 `artifacts/walkforward_research_ledger.csv` is the compact cross-trial index of
-all 15 tested variants, their comparable deltas, decisions, reasons, and source
+all 23 full-development variants, their comparable deltas, decisions, reasons, and source
 artifact prefixes.
 
 ## Production completion gate

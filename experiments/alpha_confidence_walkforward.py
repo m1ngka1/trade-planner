@@ -245,6 +245,31 @@ def _build_event(
     event_seed: int,
     scenario_seed: int,
 ) -> tuple[PointInTimeRebalanceEvent, float]:
+    event, forecast_rmse_bps, _ = _build_event_with_truth(
+        base_ctx,
+        uncertainty,
+        event_index,
+        event_seed,
+        scenario_seed,
+    )
+    return event, forecast_rmse_bps
+
+
+def _build_event_with_truth(
+    base_ctx: PlannerContext,
+    uncertainty: np.ndarray,
+    event_index: int,
+    event_seed: int,
+    scenario_seed: int,
+) -> tuple[PointInTimeRebalanceEvent, float, np.ndarray]:
+    """Build one replay event and retain latent alpha for forecast-vintage tests.
+
+    The latent return is returned beside, never inside, the optimizer context.
+    Research that simulates later forecast vintages can therefore generate
+    causal noisy observations of the latent state without making realized
+    returns or hindsight fields available to the planner.
+    """
+
     rng = np.random.default_rng(event_seed)
     dates = pd.bdate_range("2027-01-04", periods=len(base_ctx.dates))
     dates = dates + pd.offsets.BDay(event_index * (len(base_ctx.dates) + 3))
@@ -320,7 +345,7 @@ def _build_event(
     forecast_rmse_bps = float(
         10_000.0 * np.sqrt(np.mean(np.square(forecast_return - true_expected_return)))
     )
-    return event, forecast_rmse_bps
+    return event, forecast_rmse_bps, true_expected_return.copy()
 
 
 def _summary(trials: pd.DataFrame) -> pd.DataFrame:

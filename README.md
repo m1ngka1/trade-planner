@@ -305,6 +305,25 @@ haircuts and uncertainty-scaled risk budgets because they failed strict realized
 downside gates. An uncertainty-aware tie rule was also redundant with the
 existing one-basis-point economic-materiality rule. They remain research options
 rather than production defaults.
+
+The replay also rejects unconditional daily receding-horizon execution. A
+commitment-aware version that replaced the active plan only for material
+forecast P&L/risk improvements came close at a 2 bp hurdle: it improved loss
+CVaR, drawdown, early factor balance, small-order delay, and the volume ramp,
+but reduced event volatility by only 0.0207 bp versus the predeclared 0.05 bp
+materiality floor. A stricter defensive hurdle regressed. Every forecast
+vintage, accepted/rejected replan, whole-share capacity handoff, automatically
+selected coefficient, gate, schedule, and chart is retained for later replay
+on real baskets; the production high/medium/low policy is unchanged and the
+synthetic holdout remains unopened.
+
+An optimizer-internal proximal revision cost was also tested. Its hurdle is
+automatically calibrated from forecast uncertainty and the selected
+high/medium/low risk profile, but both 12-event trade-schedule variants raised
+realized volatility and within-event drawdown despite improving tail loss and
+early balance. A quadratic inventory-path form failed its two-event screen.
+These candidates are retained as research evidence, not production defaults.
+
 See [Point-in-time rebalance replay](docs/point_in_time_walkforward.md) for the
 data contract, every trial, keep/discard logic, and visual artifacts.
 
