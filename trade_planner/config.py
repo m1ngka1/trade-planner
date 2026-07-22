@@ -20,6 +20,13 @@ class TradePlannerConfig:
     residual_risk_weight: float = 1.0
     terminal_penalty: float | None = None
     solver: Any = "OSQP"
+    inventory_risk_weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.residual_risk_weight < 0:
+            raise ValueError("residual_risk_weight must be non-negative")
+        if self.inventory_risk_weight < 0:
+            raise ValueError("inventory_risk_weight must be non-negative")
 
 
 def default_earnings_aware_config() -> TradePlannerConfig:
@@ -48,4 +55,30 @@ def default_earnings_aware_config() -> TradePlannerConfig:
         residual_risk_weight=1.0,
         terminal_penalty=None,
         solver="CLARABEL",
+    )
+
+
+def default_rebalance_aware_config() -> TradePlannerConfig:
+    """Reference configuration for optimizer-derived pre-event accumulation.
+
+    Physical participation caps describe available capacity.  Accumulated
+    inventory risk discourages unnecessary early positions, Barra factors make
+    early hedging economically useful, and convex impact prevents a final-day
+    block.  The weights are a validated synthetic starting point; production
+    desks should calibrate them to their own risk and impact units.
+    """
+    return TradePlannerConfig(
+        participation_model=ParticipationCapModel(),
+        risk_model=BarraFactorRiskModel(),
+        cost_model=CompositeCostModel(
+            terms=[
+                QuadraticParticipationImpact(impact_bps_at_10pct_adv=20.0),
+                LinearBpsCost(bps=1.0),
+            ]
+        ),
+        constraints=default_constraints(),
+        residual_risk_weight=0.0,
+        terminal_penalty=None,
+        solver="CLARABEL",
+        inventory_risk_weight=1.0,
     )

@@ -1,7 +1,11 @@
 """Pluggable daily basket execution planner."""
 
 from .analytics import cumulative_side_completion
-from .config import TradePlannerConfig, default_earnings_aware_config
+from .config import (
+    TradePlannerConfig,
+    default_earnings_aware_config,
+    default_rebalance_aware_config,
+)
 from .constraints import (
     ConstraintDiagnostics,
     ConstraintPlugin,
@@ -105,6 +109,7 @@ __all__ = [
     "days_to_next_event",
     "default_constraints",
     "default_earnings_aware_config",
+    "default_rebalance_aware_config",
     "diagnose_infeasible_problem",
     "diagnose_problem",
     "format_diagnosis",

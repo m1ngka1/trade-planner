@@ -151,12 +151,23 @@ class TradePlanner:
 
     def _objective_terms(self, ctx: PlannerContext, state: OptimizationState) -> list[cp.Expression]:
         objective_terms: list[cp.Expression] = []
-        for date_index, residual in enumerate(state.residuals):
+        for date_index, (cumulative, residual) in enumerate(
+            zip(state.cumulative_trades, state.residuals)
+        ):
             trade_t = state.trades[date_index, :]
-            objective_terms.append(
-                self.config.residual_risk_weight
-                * self.config.risk_model.objective(residual, ctx, date_index)
-            )
+            # Inventory risk prices the P&L exposure already accumulated by
+            # this date.  It is opt-in so existing residual-risk schedules are
+            # unchanged until a caller deliberately enables this behavior.
+            if self.config.inventory_risk_weight > 0:
+                objective_terms.append(
+                    self.config.inventory_risk_weight
+                    * self.config.risk_model.objective(cumulative, ctx, date_index)
+                )
+            if self.config.residual_risk_weight > 0:
+                objective_terms.append(
+                    self.config.residual_risk_weight
+                    * self.config.risk_model.objective(residual, ctx, date_index)
+                )
             objective_terms.append(self.config.cost_model.objective(trade_t, ctx, date_index))
         return objective_terms
 

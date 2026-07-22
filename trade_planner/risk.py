@@ -1,4 +1,4 @@
-"""Risk models and residual-risk overlays."""
+"""Risk models for accumulated inventory or residual positions."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ from .utils import as_psd
 
 
 class RiskModel(Protocol):
-    """Plugin that returns the residual-risk expression for one date."""
+    """Plugin that returns the risk expression for one date's share position."""
 
     def objective(
         self,
-        residual_shares: cp.Expression,
+        position_shares: cp.Expression,
         ctx: PlannerContext,
         date_index: int,
     ) -> cp.Expression:
@@ -64,12 +64,12 @@ class StaticCovarianceRiskModel:
 
     def objective(
         self,
-        residual_shares: cp.Expression,
+        position_shares: cp.Expression,
         ctx: PlannerContext,
         date_index: int,
     ) -> cp.Expression:
-        residual_dollars = cp.multiply(ctx.price[date_index], residual_shares)
-        return cp.quad_form(residual_dollars, self.covariance_for_date(ctx, date_index))
+        position_dollars = cp.multiply(ctx.price[date_index], position_shares)
+        return cp.quad_form(position_dollars, self.covariance_for_date(ctx, date_index))
 
 
 class SpecificRiskOverlay(Protocol):
@@ -84,13 +84,13 @@ class BarraFactorRiskModel:
     """
     Barra-style factor risk model.
 
-    For residual shares r:
-        w = price * r
+    For share position z (accumulated inventory or residual):
+        w = price * z
         f = B.T @ w
         risk = f.T @ Sigma_f @ f + sum_i specific_variance_i * w_i^2
 
     B is the security-by-factor exposure matrix. The covariance inputs are
-    return covariance/variance, so dollar residuals convert share residuals
+    return covariance/variance, so dollar positions convert share positions
     into portfolio risk dollars.
     """
 
@@ -100,7 +100,7 @@ class BarraFactorRiskModel:
 
     def objective(
         self,
-        residual_shares: cp.Expression,
+        position_shares: cp.Expression,
         ctx: PlannerContext,
         date_index: int,
     ) -> cp.Expression:
@@ -111,10 +111,10 @@ class BarraFactorRiskModel:
             )
 
         factor_idx = self.factor_indices(ctx)
-        residual_dollars = cp.multiply(ctx.price[date_index], residual_shares)
+        position_dollars = cp.multiply(ctx.price[date_index], position_shares)
         exposure = ctx.factor_exposure[date_index][:, factor_idx]
         factor_covariance = as_psd(ctx.factor_covariance[date_index][np.ix_(factor_idx, factor_idx)])
-        factor_dollars = exposure.T @ residual_dollars
+        factor_dollars = exposure.T @ position_dollars
 
         specific_variance = ctx.specific_variance[date_index].copy()
         for overlay in self.specific_overlays:
@@ -122,7 +122,7 @@ class BarraFactorRiskModel:
         specific_variance = np.maximum(specific_variance, 0.0)
 
         factor_risk = cp.quad_form(factor_dollars, factor_covariance)
-        specific_risk = cp.sum(cp.multiply(specific_variance, cp.square(residual_dollars)))
+        specific_risk = cp.sum(cp.multiply(specific_variance, cp.square(position_dollars)))
         return factor_risk + specific_risk
 
     def factor_indices(self, ctx: PlannerContext) -> list[int]:

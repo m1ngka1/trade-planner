@@ -7,7 +7,7 @@ The package is intentionally split by extension point:
 - `context.py`: normalized `PlannerContext` data object and date utilities
 - `data.py`: provider placeholders, field alignment, and context assembly
 - `participation.py`: participation caps and cap multipliers
-- `risk.py`: covariance models and residual-risk overlays
+- `risk.py`: covariance models for cumulative inventory or residual positions
 - `costs.py`: market-impact and linear-cost objective terms
 - `constraints.py`: pluggable cvxpy constraints
 - `planner.py`: core solve orchestration
@@ -155,6 +155,39 @@ Run the fixed-policy example and the reproducible model comparison with:
 python -m examples.announcement_participation
 python experiments/participation_refinement.py
 ```
+
+## Optimizer-Derived Rebalance Pacing
+
+For anticipatory rebalance orders, use accumulated executed inventory—not the
+unexecuted residual—as the pre-event P&L-risk state. Physical participation caps
+then provide capacity, hard completion makes urgent names start when future
+capacity becomes scarce, and quadratic impact prevents everything from being
+left to the final date.
+
+```python
+from trade_planner import TradePlanner, default_rebalance_aware_config
+
+planner = TradePlanner(default_rebalance_aware_config())
+result = planner.solve(ctx)
+```
+
+Country, GICS sector/industry, beta, currency, and other balancing dimensions
+are ordinary columns in the existing Barra factor inputs. Their risk on
+cumulative executed positions encourages offsetting early trades without
+forcing a hard daily schedule.
+
+The fixed CLARABEL experiment records the current baselines, every tested
+inventory/factor/impact combination, complete schedules, factor exposures, and
+the corresponding daily-volume plots:
+
+```bash
+env PYTHONPATH=. python experiments/daily_volume_behavior.py \
+  --solver CLARABEL \
+  --output-prefix artifacts/daily_volume_behavior
+```
+
+See [Optimizer-derived daily volume behavior](docs/daily_volume_behavior.md)
+for the benchmark, acceptance gates, selected combination, and artifact map.
 
 ## CVXPY Model Diagnostics
 
@@ -323,6 +356,7 @@ For symbols `i = 1..N` and planner dates `t = 1..T`, define:
 - `ADV_{i,t}`: average daily volume
 - `rho_{i,t}`: dynamic participation cap
 - `m_{i,t}`: market-open flag
+- `h_t = sum_{\tau=1}^t x_\tau`: cumulative executed inventory after date `t`
 - `r_t = q - sum_{\tau=1}^t x_\tau`: residual unexecuted shares after date `t`
 
 The planner solves a convex daily execution problem:
@@ -330,9 +364,10 @@ The planner solves a convex daily execution problem:
 ```math
 \begin{aligned}
 \min_{\{x_t\}_{t=1}^T}\quad
-& \sum_{t=1}^T
-\lambda_{\mathrm{risk}} R_t(r_t)
-+ \sum_{t=1}^T C_t(x_t) \\
+& \sum_{t=1}^T \left[
+\lambda_{\mathrm{inventory}} R_t(h_t)
++ \lambda_{\mathrm{residual}} R_t(r_t)
++ C_t(x_t) \right] \\
 \mathrm{s.t.}\quad
 & \sum_{t=1}^T x_{i,t} = q_i,\quad \forall i \\
 & |x_{i,t}| \le \rho_{i,t} ADV_{i,t} m_{i,t},\quad \forall i,t \\
@@ -353,10 +388,11 @@ C_t(x_t)
 where the quadratic term is market impact and the linear term is spread,
 commission, fees, or soft event-window penalties.
 
-The default Barra-style residual risk model is:
+The Barra-style risk model can score either cumulative inventory or residual
+shares. For a generic share position `z_t`:
 
 ```math
-w_t = P_t r_t
+w_t = P_t z_t
 ```
 
 ```math
@@ -364,7 +400,7 @@ f_t = B_t^\top w_t
 ```
 
 ```math
-R_t(r_t)
+R_t(z_t)
 =
 f_t^\top \Sigma^{F}_t f_t
 +
@@ -373,7 +409,7 @@ f_t^\top \Sigma^{F}_t f_t
 
 Here:
 
-- `P_t = diag(p_t)` converts residual shares to residual dollars
+- `P_t = diag(p_t)` converts shares to position dollars
 - `B_t` is the security-by-factor exposure matrix
 - `Sigma^F_t` is the factor covariance matrix
 - `sigma^2_{\epsilon,i,t}` is specific return variance
