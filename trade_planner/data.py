@@ -112,6 +112,26 @@ class PlannerDataProvider:
         """Return date-by-name spread, fee, and commission forecasts."""
         return None
 
+    def load_return_residual_scenarios(
+        self,
+        symbols: Sequence[str],
+        dates: pd.DatetimeIndex,
+    ) -> Array | None:
+        """Return scenario-by-date-by-name residual holding returns, if available.
+
+        The scenario mean is removed by the downside-risk model, so expected
+        rebalance alpha remains exclusively in ``load_expected_return``.
+        """
+        return None
+
+    def load_return_scenario_weights(
+        self,
+        symbols: Sequence[str],
+        dates: pd.DatetimeIndex,
+    ) -> Array | None:
+        """Return optional probabilities for residual-return scenarios."""
+        return None
+
     def load_factor_risk_data(self, symbols: Sequence[str], dates: pd.DatetimeIndex) -> FactorRiskData:
         factor_exposure = self.load_factor_exposure(symbols, dates)
         factor_names = list(factor_exposure.columns.astype(str))
@@ -185,6 +205,8 @@ def build_context_from_provider(
         if linear_cost_raw is not None
         else None
     )
+    return_residual_scenarios = provider.load_return_residual_scenarios(symbols, dates)
+    return_scenario_weights = provider.load_return_scenario_weights(symbols, dates)
 
     event_vol = provider.load_event_volatility(symbols, dates)
     if event_vol is not None:
@@ -199,6 +221,8 @@ def build_context_from_provider(
         expected_return=expected_return,
         impact_bps_at_10pct_adv=impact_bps_at_10pct_adv,
         linear_cost_bps=linear_cost_bps,
+        return_residual_scenarios=return_residual_scenarios,
+        return_scenario_weights=return_scenario_weights,
     )
 
 
@@ -266,6 +290,8 @@ def assemble_context(
     expected_return: Array | None = None,
     impact_bps_at_10pct_adv: Array | None = None,
     linear_cost_bps: Array | None = None,
+    return_residual_scenarios: Array | None = None,
+    return_scenario_weights: Array | None = None,
 ) -> PlannerContext:
     """Assemble the normalized PlannerContext from already-loaded fields."""
     orders = normalize_orders(orders)
@@ -293,6 +319,15 @@ def assemble_context(
         factor_risk_data.specific_variance,
         dates,
         symbols,
+    )
+    aligned_return_scenarios = align_return_scenarios(
+        return_residual_scenarios,
+        dates,
+        symbols,
+    )
+    aligned_scenario_weights = align_scenario_weights(
+        return_scenario_weights,
+        None if aligned_return_scenarios is None else len(aligned_return_scenarios),
     )
 
     return PlannerContext(
@@ -339,8 +374,54 @@ def assemble_context(
             if linear_cost_bps is not None
             else None
         ),
+        return_residual_scenarios=aligned_return_scenarios,
+        return_scenario_weights=aligned_scenario_weights,
         metadata=metadata or {},
     )
+
+
+def align_return_scenarios(
+    value: Array | None,
+    dates: pd.DatetimeIndex,
+    symbols: Sequence[str],
+) -> Array | None:
+    """Validate already ordered scenario-by-date-by-symbol residual returns."""
+
+    if value is None:
+        return None
+    scenarios = np.asarray(value, dtype=float)
+    expected_tail = (len(dates), len(symbols))
+    if scenarios.ndim != 3 or scenarios.shape[1:] != expected_tail:
+        raise ValueError(
+            "return_residual_scenarios must have shape "
+            f"(scenario, date, symbol) with trailing shape {expected_tail}"
+        )
+    if len(scenarios) < 2 or not np.all(np.isfinite(scenarios)):
+        raise ValueError(
+            "return_residual_scenarios must contain at least two finite scenarios"
+        )
+    return scenarios.copy()
+
+
+def align_scenario_weights(value: Array | None, n_scenarios: int | None) -> Array | None:
+    """Validate optional scenario probabilities without forcing normalization."""
+
+    if value is None:
+        return None
+    if n_scenarios is None:
+        raise ValueError(
+            "return_scenario_weights requires return_residual_scenarios"
+        )
+    weights = np.asarray(value, dtype=float)
+    if weights.shape != (n_scenarios,):
+        raise ValueError(
+            "return_scenario_weights must contain one value per return scenario"
+        )
+    if not np.all(np.isfinite(weights)) or np.any(weights < 0) or np.sum(weights) <= 0:
+        raise ValueError(
+            "return_scenario_weights must be finite, non-negative, and nonzero"
+        )
+    return weights.copy()
 
 
 def normalize_market_panel(

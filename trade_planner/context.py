@@ -75,4 +75,6 @@ class PlannerContext:
     expected_return: Array | None = None
     impact_bps_at_10pct_adv: Array | None = None
     linear_cost_bps: Array | None = None
+    return_residual_scenarios: Array | None = None
+    return_scenario_weights: Array | None = None
     metadata: dict[str, object] = field(default_factory=dict)

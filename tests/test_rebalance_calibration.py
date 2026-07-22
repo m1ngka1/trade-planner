@@ -14,20 +14,33 @@ from trade_planner import (
     ParticipationCapModel,
     PlannerContext,
     QuadraticParticipationImpact,
+    RebalanceRiskMeasure,
     RiskAversion,
     TradePlanner,
     TradePlannerConfig,
     build_context_from_provider,
     build_rebalance_frontier,
+    calibrate_rebalance_plan,
     default_constraints,
     infer_execution_cost_matrices,
     infer_execution_costs,
+    weighted_loss_var_cvar,
 )
 from trade_planner.examples import ToyProvider
 
 
 @unittest.skipUnless("CLARABEL" in cp.installed_solvers(), "CLARABEL is not installed")
 class RebalanceCalibrationTests(unittest.TestCase):
+    def test_weighted_loss_cvar_integrates_only_the_requested_tail_mass(self) -> None:
+        loss_var, loss_cvar = weighted_loss_var_cvar(
+            np.array([-10.0, -5.0, 0.0, 5.0]),
+            np.full(4, 0.25),
+            confidence=0.75,
+        )
+
+        self.assertEqual(loss_var, 5.0)
+        self.assertEqual(loss_cvar, 10.0)
+
     def test_expected_alpha_moves_profitable_flow_earlier(self) -> None:
         ctx = _economic_context()
         common = dict(
@@ -135,6 +148,45 @@ class RebalanceCalibrationTests(unittest.TestCase):
         self.assertFalse(plan.economically_viable)
         self.assertLess(plan.metrics.expected_net_pnl_dollars, 0.0)
 
+    def test_scenarios_automatically_select_hybrid_downside_calibration(self) -> None:
+        ctx = _economic_context()
+        rng = np.random.default_rng(11)
+        scenarios = rng.normal(
+            scale=0.004,
+            size=(60, len(ctx.dates), len(ctx.symbols)),
+        )
+        target_sign = np.sign(ctx.orders["target_shares"].to_numpy(float))
+        scenarios[:6, 3:5, :] -= 0.04 * target_sign[None, None, :]
+        ctx = PlannerContext(
+            **{**ctx.__dict__, "return_residual_scenarios": scenarios}
+        )
+
+        frontier = build_rebalance_frontier(
+            ctx,
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0, 3.0),
+        )
+        plan = frontier.select("medium")
+
+        self.assertIs(frontier.risk_measure, RebalanceRiskMeasure.HYBRID_DOWNSIDE)
+        self.assertEqual(frontier.risk_metric_column, "loss_cvar_95_dollars")
+        self.assertGreater(frontier.scenario_tail_overlay_fraction, 0.0)
+        self.assertTrue(
+            any(
+                config.inventory_risk_weight > 0
+                and config.inventory_path_risk_weight > 0
+                for config in frontier.configs.values()
+            )
+        )
+        self.assertIs(plan.risk_measure, RebalanceRiskMeasure.HYBRID_DOWNSIDE)
+        high_plan = calibrate_rebalance_plan(
+            ctx,
+            risk_aversion="high",
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0, 3.0),
+        )
+        self.assertIs(high_plan.risk_measure, RebalanceRiskMeasure.VARIANCE)
+
     def test_provider_economic_inputs_are_aligned_into_context(self) -> None:
         class AlphaProvider(ToyProvider):
             def load_expected_return(self, symbols, dates):
@@ -164,6 +216,15 @@ class RebalanceCalibrationTests(unittest.TestCase):
                     index=dates,
                 )
 
+            def load_return_residual_scenarios(self, symbols, dates):
+                return np.arange(
+                    4 * len(dates) * len(symbols),
+                    dtype=float,
+                ).reshape(4, len(dates), len(symbols)) / 1_000_000.0
+
+            def load_return_scenario_weights(self, symbols, dates):
+                return np.array([0.1, 0.2, 0.3, 0.4])
+
         orders = pd.DataFrame(
             {"target_shares": [1_000.0, -800.0]},
             index=["BBB", "AAA"],
@@ -182,6 +243,11 @@ class RebalanceCalibrationTests(unittest.TestCase):
         self.assertEqual(linear.shape, (3, 2))
         np.testing.assert_allclose(impact[0], [7.0, 8.0])
         np.testing.assert_allclose(linear[0], [0.5, 0.6])
+        self.assertEqual(ctx.return_residual_scenarios.shape, (4, 3, 2))
+        np.testing.assert_allclose(
+            ctx.return_scenario_weights,
+            [0.1, 0.2, 0.3, 0.4],
+        )
 
 
 def _economic_context() -> PlannerContext:

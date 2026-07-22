@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from math import erf, sqrt
+from statistics import NormalDist
 from typing import Iterable, Mapping
 
 import numpy as np
@@ -31,6 +32,11 @@ from .costs import (
     QuadraticParticipationImpact,
     TCALinearBpsCost,
     TCAQuadraticParticipationImpact,
+)
+from .downside import (
+    ScenarioCVaRRiskModel,
+    centered_return_scenarios,
+    weighted_loss_var_cvar,
 )
 from .participation import ParticipationCapModel
 from .planner import TradePlanner, TradePlannerResult
@@ -56,6 +62,25 @@ class RiskAversion(str, Enum):
             raise ValueError(f"risk_aversion must be one of: {allowed}") from error
 
 
+class RebalanceRiskMeasure(str, Enum):
+    """Risk measure used to build and select the execution frontier."""
+
+    AUTO = "auto"
+    VARIANCE = "variance"
+    DOWNSIDE_CVAR = "downside_cvar"
+    HYBRID_DOWNSIDE = "hybrid_downside"
+
+    @classmethod
+    def parse(cls, value: RebalanceRiskMeasure | str) -> RebalanceRiskMeasure:
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value).strip().lower())
+        except ValueError as error:
+            allowed = ", ".join(member.value for member in cls)
+            raise ValueError(f"risk_measure must be one of: {allowed}") from error
+
+
 @dataclass(frozen=True)
 class RiskPreference:
     """Fraction of the feasible risk range made available to a desk profile."""
@@ -66,8 +91,8 @@ class RiskPreference:
 
 DEFAULT_RISK_PREFERENCES: Mapping[RiskAversion, RiskPreference] = {
     RiskAversion.HIGH: RiskPreference(
-        risk_frontier_fraction=0.15,
-        description="Stay close to the minimum feasible accumulated P&L risk.",
+        risk_frontier_fraction=0.05,
+        description="Stay inside the lowest five percent of feasible P&L risk.",
     ),
     RiskAversion.MEDIUM: RiskPreference(
         risk_frontier_fraction=0.50,
@@ -88,6 +113,7 @@ class RebalanceEconomicMetrics:
     expected_net_pnl_dollars: float
     pnl_vol_dollars: float
     loss_var_95_dollars: float
+    loss_cvar_95_dollars: float
     probability_profitable: float
 
     def as_dict(self) -> dict[str, float]:
@@ -98,6 +124,7 @@ class RebalanceEconomicMetrics:
             "expected_net_pnl_dollars": self.expected_net_pnl_dollars,
             "pnl_vol_dollars": self.pnl_vol_dollars,
             "loss_var_95_dollars": self.loss_var_95_dollars,
+            "loss_cvar_95_dollars": self.loss_cvar_95_dollars,
             "probability_profitable": self.probability_profitable,
         }
 
@@ -114,6 +141,8 @@ class CalibratedRebalancePlan:
     linear_cost_bps: float
     economically_viable: bool
     heterogeneous_tca: bool
+    risk_measure: RebalanceRiskMeasure
+    scenario_tail_overlay_fraction: float
 
 
 @dataclass(frozen=True)
@@ -129,6 +158,9 @@ class RebalanceFrontier:
     impact_bps_matrix: np.ndarray
     linear_cost_bps_matrix: np.ndarray
     heterogeneous_tca: bool
+    risk_measure: RebalanceRiskMeasure
+    risk_metric_column: str
+    scenario_tail_overlay_fraction: float
 
     def select(
         self,
@@ -147,12 +179,15 @@ class RebalanceFrontier:
         valid = self.frontier[self.frontier["status"].isin(("optimal", "optimal_inaccurate"))].copy()
         if valid.empty:
             raise RuntimeError("rebalance calibration frontier contains no solved candidates")
-        min_risk = float(valid["pnl_vol_dollars"].min())
-        max_risk = float(valid["pnl_vol_dollars"].max())
+        min_risk = float(valid[self.risk_metric_column].min())
+        max_risk = float(valid[self.risk_metric_column].max())
         budget = min_risk + preference.risk_frontier_fraction * (max_risk - min_risk)
-        eligible = valid[valid["pnl_vol_dollars"] <= budget + max(1e-8, budget * 1e-8)].copy()
+        eligible = valid[
+            valid[self.risk_metric_column]
+            <= budget + max(1e-8, abs(budget) * 1e-8)
+        ].copy()
         if eligible.empty:
-            eligible = valid.nsmallest(1, "pnl_vol_dollars")
+            eligible = valid.nsmallest(1, self.risk_metric_column)
         parent_target = self.ctx.orders["target_shares"].reindex(self.ctx.symbols).to_numpy(float)
         parent_gross = float(np.sum(np.abs(parent_target * self.ctx.price[0])))
         materiality_dollars = minimum_edge_bps / 10_000.0 * parent_gross
@@ -164,8 +199,13 @@ class RebalanceFrontier:
         # materiality threshold. Solver noise and tiny alpha changes should not
         # move a production schedule along the frontier.
         selected_row = economically_tied.sort_values(
-            ["pnl_vol_dollars", "expected_net_pnl_dollars", "impact_cost_dollars"],
-            ascending=[True, False, True],
+            [
+                self.risk_metric_column,
+                "pnl_vol_dollars",
+                "expected_net_pnl_dollars",
+                "impact_cost_dollars",
+            ],
+            ascending=[True, True, False, True],
         ).iloc[0]
         candidate = str(selected_row["candidate"])
         metrics = RebalanceEconomicMetrics(
@@ -185,6 +225,8 @@ class RebalanceFrontier:
             linear_cost_bps=self.linear_cost_bps,
             economically_viable=metrics.expected_net_pnl_dollars > 0.0,
             heterogeneous_tca=self.heterogeneous_tca,
+            risk_measure=self.risk_measure,
+            scenario_tail_overlay_fraction=self.scenario_tail_overlay_fraction,
         )
 
 
@@ -195,15 +237,31 @@ def calibrate_rebalance_plan(
     solver: str = "OSQP",
     lambda_multipliers: Iterable[float] | None = None,
     heterogeneous_tca: bool = True,
+    risk_measure: RebalanceRiskMeasure | str = RebalanceRiskMeasure.AUTO,
+    cvar_confidence: float = 0.95,
 ) -> CalibratedRebalancePlan:
     """Solve a data-scaled frontier and select the best plan inside a risk budget."""
+
+    parsed_aversion = RiskAversion.parse(risk_aversion)
+    parsed_measure = RebalanceRiskMeasure.parse(risk_measure)
+    if (
+        parsed_measure is RebalanceRiskMeasure.AUTO
+        and ctx.return_residual_scenarios is not None
+        and parsed_aversion is RiskAversion.HIGH
+    ):
+        # Finite-scenario tail objectives can overfit the few observations in
+        # the extreme tail. The high-aversion policy therefore uses the stable
+        # covariance frontier; medium/low use the hybrid excess-tail overlay.
+        parsed_measure = RebalanceRiskMeasure.VARIANCE
 
     return build_rebalance_frontier(
         ctx,
         solver=solver,
         lambda_multipliers=lambda_multipliers,
         heterogeneous_tca=heterogeneous_tca,
-    ).select(risk_aversion)
+        risk_measure=parsed_measure,
+        cvar_confidence=cvar_confidence,
+    ).select(parsed_aversion)
 
 
 def build_rebalance_frontier(
@@ -212,16 +270,56 @@ def build_rebalance_frontier(
     solver: str = "OSQP",
     lambda_multipliers: Iterable[float] | None = None,
     heterogeneous_tca: bool = True,
+    risk_measure: RebalanceRiskMeasure | str = RebalanceRiskMeasure.AUTO,
+    cvar_confidence: float = 0.95,
 ) -> RebalanceFrontier:
     """Solve the expected-net-P&L versus accumulated-P&L-risk frontier."""
 
+    if not np.isclose(cvar_confidence, 0.95):
+        raise ValueError("rebalance calibration metrics currently require cvar_confidence=0.95")
     _validate_economic_context(ctx)
     impact_matrix, linear_matrix = infer_execution_cost_matrices(ctx)
     impact_bps, linear_bps = infer_execution_costs(ctx)
     risk_model = BarraFactorRiskModel()
-    base_lambda = _economic_lambda_scale(ctx, risk_model, impact_bps, linear_bps)
+    resolved_risk_measure = _resolve_risk_measure(ctx, risk_measure)
+    scenario_tail_overlay_fraction = 0.0
+    if resolved_risk_measure in {
+        RebalanceRiskMeasure.DOWNSIDE_CVAR,
+        RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+    }:
+        if not 0.0 < cvar_confidence < 1.0:
+            raise ValueError("cvar_confidence must be strictly between zero and one")
+        centered_return_scenarios(ctx)
+        base_cvar_weight = _economic_cvar_weight_scale(
+            ctx,
+            impact_bps,
+            linear_bps,
+            cvar_confidence,
+        )
+        base_variance_weight = _economic_lambda_scale(
+            ctx,
+            risk_model,
+            impact_bps,
+            linear_bps,
+        )
+        if resolved_risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE:
+            scenario_tail_overlay_fraction = _scenario_tail_overlay_fraction(
+                ctx,
+                risk_model,
+                cvar_confidence,
+            )
+        risk_metric_column = "loss_cvar_95_dollars"
+    else:
+        base_variance_weight = _economic_lambda_scale(
+            ctx,
+            risk_model,
+            impact_bps,
+            linear_bps,
+        )
+        base_cvar_weight = 0.0
+        risk_metric_column = "pnl_vol_dollars"
     if lambda_multipliers is None:
-        lambda_multipliers = (0.0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1_000.0)
+        lambda_multipliers = _default_lambda_multipliers(resolved_risk_measure)
     multipliers = sorted({float(value) for value in lambda_multipliers})
     if not multipliers or multipliers[0] < 0 or not np.all(np.isfinite(multipliers)):
         raise ValueError("lambda_multipliers must contain finite non-negative values")
@@ -230,8 +328,31 @@ def build_rebalance_frontier(
     configs: dict[str, TradePlannerConfig] = {}
     results: dict[str, TradePlannerResult] = {}
     for multiplier in multipliers:
-        risk_weight = base_lambda * multiplier
-        candidate = f"multiplier_{multiplier:.6g}__lambda_{risk_weight:.6g}"
+        variance_weight = (
+            base_variance_weight * multiplier
+            if resolved_risk_measure
+            in {RebalanceRiskMeasure.VARIANCE, RebalanceRiskMeasure.HYBRID_DOWNSIDE}
+            else 0.0
+        )
+        path_risk_weight = (
+            base_cvar_weight
+            * multiplier
+            * (
+                scenario_tail_overlay_fraction
+                if resolved_risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE
+                else 1.0
+            )
+            if resolved_risk_measure
+            in {
+                RebalanceRiskMeasure.DOWNSIDE_CVAR,
+                RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+            }
+            else 0.0
+        )
+        candidate = (
+            f"{resolved_risk_measure.value}__multiplier_{multiplier:.6g}"
+            f"__variance_{variance_weight:.6g}__cvar_{path_risk_weight:.6g}"
+        )
         if heterogeneous_tca:
             cost_terms = (
                 TCAQuadraticParticipationImpact(impact_matrix),
@@ -252,8 +373,14 @@ def build_rebalance_frontier(
             cost_model=CompositeCostModel(terms=cost_terms),
             constraints=default_constraints(),
             residual_risk_weight=0.0,
-            inventory_risk_weight=risk_weight,
+            inventory_risk_weight=variance_weight,
             inventory_alpha_model=ExpectedReturnAlphaModel(),
+            inventory_path_risk_weight=path_risk_weight,
+            inventory_path_risk_model=(
+                ScenarioCVaRRiskModel(confidence=cvar_confidence)
+                if path_risk_weight > 0
+                else None
+            ),
             terminal_penalty=None,
             solver=solver,
         )
@@ -266,13 +393,17 @@ def build_rebalance_frontier(
                 risk_model=risk_model,
                 impact_bps_at_10pct_adv=evaluation_impact,
                 linear_cost_bps=evaluation_linear,
+                cvar_confidence=cvar_confidence,
             )
         except Exception as error:
             rows.append(
                 {
                     "candidate": candidate,
+                    "risk_measure": resolved_risk_measure.value,
+                    "scenario_tail_overlay_fraction": scenario_tail_overlay_fraction,
                     "lambda_multiplier": multiplier,
-                    "inventory_risk_weight": risk_weight,
+                    "inventory_risk_weight": variance_weight,
+                    "inventory_path_risk_weight": path_risk_weight,
                     "status": type(error).__name__,
                     "failure_reason": str(error),
                 }
@@ -282,8 +413,11 @@ def build_rebalance_frontier(
         rows.append(
             {
                 "candidate": candidate,
+                "risk_measure": resolved_risk_measure.value,
+                "scenario_tail_overlay_fraction": scenario_tail_overlay_fraction,
                 "lambda_multiplier": multiplier,
-                "inventory_risk_weight": risk_weight,
+                "inventory_risk_weight": variance_weight,
+                "inventory_path_risk_weight": path_risk_weight,
                 "status": str(result.diagnostics["status"]),
                 **metrics.as_dict(),
             }
@@ -299,6 +433,9 @@ def build_rebalance_frontier(
         impact_bps_matrix=impact_matrix,
         linear_cost_bps_matrix=linear_matrix,
         heterogeneous_tca=heterogeneous_tca,
+        risk_measure=resolved_risk_measure,
+        risk_metric_column=risk_metric_column,
+        scenario_tail_overlay_fraction=scenario_tail_overlay_fraction,
     )
 
 
@@ -358,9 +495,12 @@ def evaluate_rebalance_schedule(
     risk_model: BarraFactorRiskModel | None = None,
     impact_bps_at_10pct_adv: float | np.ndarray,
     linear_cost_bps: float | np.ndarray,
+    cvar_confidence: float = 0.95,
 ) -> RebalanceEconomicMetrics:
     """Evaluate expected net P&L and holding-P&L volatility for one schedule."""
 
+    if not np.isclose(cvar_confidence, 0.95):
+        raise ValueError("rebalance economic metrics currently require cvar_confidence=0.95")
     risk_model = risk_model or BarraFactorRiskModel()
     impact_matrix = _as_cost_matrix(
         impact_bps_at_10pct_adv,
@@ -411,19 +551,85 @@ def evaluate_rebalance_schedule(
 
     net = expected_alpha - impact_cost - linear_cost
     pnl_vol = sqrt(max(risk_variance, 0.0))
-    probability_profitable = (
-        0.5 * (1.0 + erf(net / (pnl_vol * sqrt(2.0))))
-        if pnl_vol > 0
-        else float(net > 0)
-    )
+    if ctx.return_residual_scenarios is not None:
+        scenarios, weights = centered_return_scenarios(ctx)
+        residual_pnl = np.einsum(
+            "stn,tn->s",
+            scenarios,
+            cumulative * ctx.price,
+        )
+        scenario_net_pnl = net + residual_pnl
+        loss_var, loss_cvar = weighted_loss_var_cvar(
+            scenario_net_pnl,
+            weights,
+            confidence=cvar_confidence,
+        )
+        probability_profitable = float(np.sum(weights[scenario_net_pnl > 0]))
+    else:
+        probability_profitable = (
+            0.5 * (1.0 + erf(net / (pnl_vol * sqrt(2.0))))
+            if pnl_vol > 0
+            else float(net > 0)
+        )
+        normal = NormalDist()
+        normal_quantile = normal.inv_cdf(cvar_confidence)
+        normal_expected_shortfall_multiplier = (
+            normal.pdf(normal_quantile) / (1.0 - cvar_confidence)
+        )
+        loss_var = normal_quantile * pnl_vol - net
+        loss_cvar = normal_expected_shortfall_multiplier * pnl_vol - net
     return RebalanceEconomicMetrics(
         expected_alpha_dollars=expected_alpha,
         impact_cost_dollars=impact_cost,
         linear_cost_dollars=linear_cost,
         expected_net_pnl_dollars=net,
         pnl_vol_dollars=pnl_vol,
-        loss_var_95_dollars=1.645 * pnl_vol - net,
+        loss_var_95_dollars=loss_var,
+        loss_cvar_95_dollars=loss_cvar,
         probability_profitable=probability_profitable,
+    )
+
+
+def _resolve_risk_measure(
+    ctx: PlannerContext,
+    risk_measure: RebalanceRiskMeasure | str,
+) -> RebalanceRiskMeasure:
+    parsed = RebalanceRiskMeasure.parse(risk_measure)
+    if parsed is RebalanceRiskMeasure.AUTO:
+        return (
+            RebalanceRiskMeasure.HYBRID_DOWNSIDE
+            if ctx.return_residual_scenarios is not None
+            else RebalanceRiskMeasure.VARIANCE
+        )
+    return parsed
+
+
+def _default_lambda_multipliers(
+    risk_measure: RebalanceRiskMeasure,
+) -> tuple[float, ...]:
+    """Use a smaller grid for scenario models, which are costlier to solve."""
+
+    if risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE:
+        return (0.0, 0.1, 0.3, 1.0, 2.0, 3.0, 10.0, 30.0, 100.0)
+    if risk_measure is RebalanceRiskMeasure.DOWNSIDE_CVAR:
+        return (0.0, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
+    return (
+        0.0,
+        1e-4,
+        3e-4,
+        1e-3,
+        3e-3,
+        1e-2,
+        3e-2,
+        0.1,
+        0.3,
+        1.0,
+        3.0,
+        10.0,
+        30.0,
+        100.0,
+        300.0,
+        1_000.0,
     )
 
 
@@ -461,6 +667,76 @@ def _economic_lambda_scale(
     cost_scale = gross * (impact_bps + linear_bps) / 10_000.0
     economic_dollars = max(abs(full_alpha), cost_scale, gross / 10_000.0, 1e-6)
     return economic_dollars / max(full_risk_variance, 1e-12)
+
+
+def _economic_cvar_weight_scale(
+    ctx: PlannerContext,
+    impact_bps: float,
+    linear_bps: float,
+    confidence: float,
+) -> float:
+    """Scale a dollar-CVaR penalty from the basket's own economics."""
+
+    target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+    full_alpha = 0.0
+    full_positions = []
+    for date_index in range(len(ctx.dates)):
+        target_dollars = np.asarray(ctx.price[date_index], dtype=float) * target
+        full_positions.append(target_dollars)
+        full_alpha += float(np.dot(target_dollars, ctx.expected_return[date_index]))
+    gross = float(np.sum(np.abs(ctx.price[0] * target)))
+    cost_scale = gross * (impact_bps + linear_bps) / 10_000.0
+    economic_dollars = max(abs(full_alpha), cost_scale, gross / 10_000.0, 1e-6)
+
+    scenarios, weights = centered_return_scenarios(ctx)
+    full_residual_pnl = np.einsum(
+        "stn,tn->s",
+        scenarios,
+        np.asarray(full_positions, dtype=float),
+    )
+    _, full_cvar = weighted_loss_var_cvar(
+        full_residual_pnl,
+        weights,
+        confidence=confidence,
+    )
+    return economic_dollars / max(full_cvar, gross / 10_000.0, 1e-12)
+
+
+def _scenario_tail_overlay_fraction(
+    ctx: PlannerContext,
+    risk_model: BarraFactorRiskModel,
+    confidence: float,
+) -> float:
+    """Price only scenario tail risk beyond covariance-implied expected shortfall."""
+
+    target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+    target_positions = []
+    full_variance = 0.0
+    for date_index in range(len(ctx.dates)):
+        position_dollars = np.asarray(ctx.price[date_index], dtype=float) * target
+        target_positions.append(position_dollars)
+        covariance = _security_covariance(ctx, date_index, risk_model)
+        full_variance += float(position_dollars @ covariance @ position_dollars)
+
+    scenarios, weights = centered_return_scenarios(ctx)
+    residual_pnl = np.einsum(
+        "stn,tn->s",
+        scenarios,
+        np.asarray(target_positions, dtype=float),
+    )
+    _, scenario_cvar = weighted_loss_var_cvar(
+        residual_pnl,
+        weights,
+        confidence=confidence,
+    )
+    normal = NormalDist()
+    normal_quantile = normal.inv_cdf(confidence)
+    normal_cvar_multiplier = normal.pdf(normal_quantile) / (1.0 - confidence)
+    normal_cvar = normal_cvar_multiplier * sqrt(max(full_variance, 0.0))
+    if normal_cvar <= 0:
+        return 0.0
+    excess_fraction = scenario_cvar / normal_cvar - 1.0
+    return float(np.clip(excess_fraction, 0.0, 1.0))
 
 
 def _security_covariance(

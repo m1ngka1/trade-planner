@@ -7,6 +7,7 @@ from .calibration import (
     CalibratedRebalancePlan,
     RebalanceEconomicMetrics,
     RebalanceFrontier,
+    RebalanceRiskMeasure,
     RiskAversion,
     RiskPreference,
     build_rebalance_frontier,
@@ -54,6 +55,8 @@ from .data import (
     align_date_symbol_field,
     align_factor_covariance,
     align_factor_exposure,
+    align_return_scenarios,
+    align_scenario_weights,
     align_specific_variance,
     assemble_context,
     build_context_from_provider,
@@ -62,6 +65,12 @@ from .data import (
     normalize_orders,
 )
 from .diagnostics import diagnose_infeasible_problem, diagnose_problem, format_diagnosis, format_infeasibility_diagnosis
+from .downside import (
+    InventoryPathRiskModel,
+    ScenarioCVaRRiskModel,
+    centered_return_scenarios,
+    weighted_loss_var_cvar,
+)
 from .mosek_diagnostics import DiagnosticMOSEK
 from .participation import (
     AdaptiveAnnouncementParticipation,
@@ -104,6 +113,7 @@ __all__ = [
     "HardCompletionConstraint",
     "InfeasiblePlanError",
     "InventoryAlphaModel",
+    "InventoryPathRiskModel",
     "LinearBpsCost",
     "LogisticEarningsParticipation",
     "MinCompletionByDate",
@@ -116,9 +126,11 @@ __all__ = [
     "QuadraticParticipationImpact",
     "RebalanceEconomicMetrics",
     "RebalanceFrontier",
+    "RebalanceRiskMeasure",
     "RiskAversion",
     "RiskModel",
     "RiskPreference",
+    "ScenarioCVaRRiskModel",
     "SpecificRiskOverlay",
     "StaticCovarianceRiskModel",
     "TCALinearBpsCost",
@@ -131,6 +143,8 @@ __all__ = [
     "align_date_symbol_field",
     "align_factor_covariance",
     "align_factor_exposure",
+    "align_return_scenarios",
+    "align_scenario_weights",
     "align_specific_variance",
     "assemble_context",
     "build_market_panel_from_provider",
@@ -138,6 +152,7 @@ __all__ = [
     "build_context_from_provider",
     "build_rebalance_frontier",
     "calibrate_rebalance_plan",
+    "centered_return_scenarios",
     "cumulative_side_completion",
     "days_to_next_event",
     "default_constraints",
@@ -155,5 +170,6 @@ __all__ = [
     "normalize_orders",
     "with_diagnostics",
     "with_variable_diagnostics",
+    "weighted_loss_var_cvar",
     "announcement_participation_rates",
 ]

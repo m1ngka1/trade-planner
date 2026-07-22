@@ -174,6 +174,17 @@ class TradePlanner:
                     self.config.inventory_alpha_model.objective(cumulative, ctx, date_index)
                 )
             objective_terms.append(self.config.cost_model.objective(trade_t, ctx, date_index))
+        if (
+            self.config.inventory_path_risk_weight > 0
+            and self.config.inventory_path_risk_model is not None
+        ):
+            objective_terms.append(
+                self.config.inventory_path_risk_weight
+                * self.config.inventory_path_risk_model.objective(
+                    state.cumulative_trades,
+                    ctx,
+                )
+            )
         return objective_terms
 
     def _solve_problem(self, problem: cp.Problem) -> None:

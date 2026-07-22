@@ -213,7 +213,8 @@ The calibrated objective is:
 ```text
 expected market impact + spread/fees
     - expected holding alpha
-    + selected risk coefficient * accumulated holding-P&L variance
+    + selected covariance coefficient * accumulated holding-P&L variance
+    + selected tail coefficient * path loss CVaR
 ```
 
 There is deliberately no separate alpha coefficient: forecast confidence is
@@ -223,7 +224,16 @@ surfaces directly, with a volatility-based impact fallback. The inventory-risk
 coefficient is selected from solved schedules rather than copied from the
 unit-scaled behavior fixture.
 
-`high` stays near the minimum feasible P&L risk, `medium` allows half of the
+When the provider also supplies centered or uncentered residual-return
+scenarios through `return_residual_scenarios`, the planner centers them and
+prices only the scenario tail in excess of covariance-implied expected
+shortfall. Both risk coefficients are scaled from the basket's expected dollars;
+the user still chooses only a risk-aversion label. `high` uses the more stable
+covariance frontier because the recorded experiment found no robust benefit
+from fitting its extreme tail. `medium` and `low` use the hybrid frontier when
+scenario data is present, otherwise they fall back to covariance.
+
+`high` stays within the lowest 5% of feasible P&L risk, `medium` allows half of the
 feasible risk range when expected alpha pays for it, and `low` allows the full
 range. Within each budget, expected-P&L differences smaller than one basis
 point of parent gross are treated as economically tied and the lower-risk plan
@@ -372,6 +382,9 @@ The provider implements:
 - `load_specific_variance(symbols, dates)`
 - optional `load_event_volatility(symbols, dates)`: returns event jump volatility used by the earnings risk overlay
 - optional `load_expected_return(symbols, dates)`: probability-weighted expected return earned by accumulated inventory after each planner date
+- optional `load_impact_bps_at_10pct_adv(symbols, dates)` and `load_linear_cost_bps(symbols, dates)`: date/name TCA surfaces
+- optional `load_return_residual_scenarios(symbols, dates)`: scenario-by-date-by-name holding-return residuals for hybrid downside risk
+- optional `load_return_scenario_weights(symbols, dates)`: one probability per residual-return scenario
 
 Minimal provider skeleton:
 

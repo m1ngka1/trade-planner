@@ -2,8 +2,8 @@
 
 The experiment keeps the existing shape/feasibility ideas but evaluates plans
 in money terms. It compares expected alpha capture, impact, accumulated P&L
-volatility, factor imbalance, and Monte Carlo net P&L for high/medium/low risk
-preferences selected from one solved frontier.
+volatility, factor imbalance, and replicated fat-tail net P&L for variance,
+pure-CVaR, and covariance-plus-excess-tail frontiers.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from trade_planner import (
     ParticipationCapModel,
     PlannerContext,
     QuadraticParticipationImpact,
+    RebalanceRiskMeasure,
     RiskAversion,
+    ScenarioCVaRRiskModel,
     TCALinearBpsCost,
     TCAQuadraticParticipationImpact,
     TradePlanner,
@@ -35,6 +37,7 @@ from trade_planner import (
     evaluate_rebalance_schedule,
     infer_execution_cost_matrices,
     infer_execution_costs,
+    weighted_loss_var_cvar,
 )
 
 
@@ -52,9 +55,20 @@ FACTOR_NAMES = (
 )
 RNG_SEED = 20260723
 N_SCENARIOS = 5_000
+EVALUATION_SEEDS = tuple(RNG_SEED + offset for offset in range(5))
+OPTIMIZATION_SCENARIO_SEED = 20260724
+N_OPTIMIZATION_SCENARIOS = 256
 EVENT_LIQUIDITY_CURVES = {
     "medium_event_liquidity": np.array([0.60, 0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.50, 1.80]),
     "strong_event_liquidity": np.array([0.40, 0.50, 0.60, 0.80, 1.00, 1.20, 1.40, 1.60, 2.00, 2.50]),
+}
+HYBRID_CVAR_SETTINGS = {
+    "hybrid_medium_cov1_cvar0.1": (1.0, 0.1),
+    "hybrid_medium_cov1_cvar0.3": (1.0, 0.3),
+    "hybrid_medium_cov1_cvar1": (1.0, 1.0),
+    "hybrid_medium_cov1.5_cvar0.3": (1.5, 0.3),
+    "hybrid_medium_cov2_cvar0.3": (2.0, 0.3),
+    "hybrid_medium_cov1.5_cvar1": (1.5, 1.0),
 }
 
 
@@ -162,6 +176,14 @@ def economic_fixture() -> tuple[PlannerContext, pd.DataFrame]:
         impact_bps_at_10pct_adv=impact_bps_matrix,
         linear_cost_bps=linear_cost_bps_matrix,
     )
+    ctx = replace(
+        ctx,
+        return_residual_scenarios=_stress_residual_returns(
+            ctx,
+            N_OPTIMIZATION_SCENARIOS,
+            OPTIMIZATION_SCENARIO_SEED,
+        ),
+    )
     return ctx, classifications
 
 
@@ -172,6 +194,7 @@ def _planner(
     linear_bps: float | np.ndarray,
     alpha: bool,
     solver: str,
+    inventory_path_risk_weight: float = 0.0,
 ) -> TradePlanner:
     if np.asarray(impact_bps).ndim == 0 and np.asarray(linear_bps).ndim == 0:
         cost_terms = (
@@ -192,6 +215,12 @@ def _planner(
             residual_risk_weight=0.0,
             inventory_risk_weight=inventory_risk_weight,
             inventory_alpha_model=ExpectedReturnAlphaModel() if alpha else None,
+            inventory_path_risk_weight=inventory_path_risk_weight,
+            inventory_path_risk_model=(
+                ScenarioCVaRRiskModel()
+                if inventory_path_risk_weight > 0
+                else None
+            ),
             solver=solver,
         )
     )
@@ -201,24 +230,65 @@ def run_experiment(
     solver: str = "OSQP",
 ) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
     ctx, classifications = economic_fixture()
-    frontier = build_rebalance_frontier(ctx, solver=solver)
+    frontier = build_rebalance_frontier(
+        ctx,
+        solver=solver,
+        risk_measure=RebalanceRiskMeasure.VARIANCE,
+    )
     selections = {
         profile.value: frontier.select(profile)
+        for profile in (RiskAversion.HIGH, RiskAversion.MEDIUM, RiskAversion.LOW)
+    }
+    cvar_frontier = build_rebalance_frontier(
+        ctx,
+        solver=solver,
+        risk_measure=RebalanceRiskMeasure.DOWNSIDE_CVAR,
+    )
+    cvar_selections = {
+        profile.value: cvar_frontier.select(profile)
+        for profile in (RiskAversion.HIGH, RiskAversion.MEDIUM, RiskAversion.LOW)
+    }
+    hybrid_frontier = build_rebalance_frontier(
+        ctx,
+        solver=solver,
+        risk_measure=RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+    )
+    hybrid_selections = {
+        profile.value: hybrid_frontier.select(profile)
         for profile in (RiskAversion.HIGH, RiskAversion.MEDIUM, RiskAversion.LOW)
     }
     impact_bps, linear_bps = infer_execution_costs(ctx)
     impact_matrix, linear_matrix = infer_execution_cost_matrices(ctx)
     medium_weight = selections["medium"].config.inventory_risk_weight
+    cvar_base_weight = float(
+        cvar_frontier.frontier.loc[
+            np.isclose(cvar_frontier.frontier["lambda_multiplier"], 1.0),
+            "inventory_path_risk_weight",
+        ].iloc[0]
+    )
 
     trial_schedules: dict[str, pd.DataFrame] = {
         f"profile_{name}": plan.result.schedule
         for name, plan in selections.items()
     }
+    trial_schedules.update(
+        {
+            f"cvar_profile_{name}": plan.result.schedule
+            for name, plan in cvar_selections.items()
+        }
+    )
+    trial_schedules.update(
+        {
+            f"hybrid_profile_{name}": plan.result.schedule
+            for name, plan in hybrid_selections.items()
+        }
+    )
     trial_contexts = {trial: ctx for trial in trial_schedules}
     scalar_frontier = build_rebalance_frontier(
         ctx,
         solver=solver,
         heterogeneous_tca=False,
+        risk_measure=RebalanceRiskMeasure.VARIANCE,
     )
     trial_schedules["medium_scalar_tca"] = scalar_frontier.select("medium").result.schedule
     trial_contexts["medium_scalar_tca"] = ctx
@@ -260,6 +330,19 @@ def run_experiment(
     # omitted by the solve is not also omitted from measurement.
     trial_contexts["medium_weight_no_factor"] = ctx
 
+    # Pure sample-CVaR can overfit a small tail set and forget stable factor
+    # hedges. Keep the covariance term and test CVaR only as a scaled overlay.
+    for trial, (covariance_multiplier, cvar_multiplier) in HYBRID_CVAR_SETTINGS.items():
+        trial_schedules[trial] = _planner(
+            inventory_risk_weight=medium_weight * covariance_multiplier,
+            inventory_path_risk_weight=cvar_base_weight * cvar_multiplier,
+            impact_bps=impact_matrix,
+            linear_bps=linear_matrix,
+            alpha=True,
+            solver=solver,
+        ).solve(ctx).schedule
+        trial_contexts[trial] = ctx
+
     # New hypothesis: if forecast closing-auction/rebalance liquidity rises
     # toward the event, date-varying ADV should create late capacity and lower
     # impact without a hard-coded volume curve. Test a moderate and strong
@@ -269,11 +352,20 @@ def run_experiment(
             ctx,
             adv_shares=ctx.adv_shares * multipliers[:, None],
         )
-        liquidity_frontier = build_rebalance_frontier(liquidity_ctx, solver=solver)
+        liquidity_frontier = build_rebalance_frontier(
+            liquidity_ctx,
+            solver=solver,
+            risk_measure=RebalanceRiskMeasure.VARIANCE,
+        )
         trial_schedules[trial] = liquidity_frontier.select("medium").result.schedule
         trial_contexts[trial] = liquidity_ctx
 
-    returns = _simulated_returns(ctx, N_SCENARIOS, RNG_SEED)
+    evaluation_returns = [
+        _stress_residual_returns(ctx, N_SCENARIOS, seed)
+        + ctx.expected_return[None, :, :]
+        for seed in EVALUATION_SEEDS
+    ]
+    returns = evaluation_returns[0]
     trial_rows: list[dict[str, object]] = []
     profiles: list[pd.DataFrame] = []
     exposures: list[pd.DataFrame] = []
@@ -290,6 +382,24 @@ def run_experiment(
         )
         behavior, profile, exposure = _behavior_metrics(trial_ctx, classifications, schedule)
         scenario_pnl = _scenario_pnl(trial_ctx, schedule, economics, returns)
+        scenario_weights = np.full(len(scenario_pnl), 1.0 / len(scenario_pnl))
+        scenario_loss_var, scenario_loss_cvar = weighted_loss_var_cvar(
+            scenario_pnl,
+            scenario_weights,
+        )
+        replicated_cvars = []
+        for replicated_returns in evaluation_returns:
+            replicated_pnl = _scenario_pnl(
+                trial_ctx,
+                schedule,
+                economics,
+                replicated_returns,
+            )
+            _, replicated_cvar = weighted_loss_var_cvar(
+                replicated_pnl,
+                scenario_weights,
+            )
+            replicated_cvars.append(replicated_cvar)
         scenario_summary = {
             "trial": trial,
             "scenario_mean_pnl_dollars": float(np.mean(scenario_pnl)),
@@ -298,6 +408,13 @@ def run_experiment(
             "scenario_median_pnl_dollars": float(np.median(scenario_pnl)),
             "scenario_p95_pnl_dollars": float(np.quantile(scenario_pnl, 0.95)),
             "scenario_probability_profitable": float(np.mean(scenario_pnl > 0)),
+            "scenario_loss_var_95_dollars": scenario_loss_var,
+            "scenario_loss_cvar_95_dollars": scenario_loss_cvar,
+            "scenario_loss_cvar_95_mean_dollars": float(np.mean(replicated_cvars)),
+            "scenario_loss_cvar_95_std_dollars": float(
+                np.std(replicated_cvars, ddof=1)
+            ),
+            "scenario_loss_cvar_95_worst_dollars": float(np.max(replicated_cvars)),
         }
         scenario_summaries.append(scenario_summary)
         trial_rows.append(
@@ -341,6 +458,14 @@ def run_experiment(
         profile: _candidate_for_result(frontier.results, plan.result)
         for profile, plan in selections.items()
     }
+    cvar_selected_candidates = {
+        profile: _candidate_for_result(cvar_frontier.results, plan.result)
+        for profile, plan in cvar_selections.items()
+    }
+    hybrid_selected_candidates = {
+        profile: _candidate_for_result(hybrid_frontier.results, plan.result)
+        for profile, plan in hybrid_selections.items()
+    }
     frontier_output = frontier.frontier.copy()
     frontier_output["selected_profile"] = ""
     for profile, candidate in selected_candidates.items():
@@ -348,6 +473,24 @@ def run_experiment(
             frontier_output["candidate"] == candidate,
             "selected_profile",
         ] = profile
+    cvar_frontier_output = cvar_frontier.frontier.copy()
+    cvar_frontier_output["selected_profile"] = ""
+    for profile, candidate in cvar_selected_candidates.items():
+        cvar_frontier_output.loc[
+            cvar_frontier_output["candidate"] == candidate,
+            "selected_profile",
+        ] = profile
+    hybrid_frontier_output = hybrid_frontier.frontier.copy()
+    hybrid_frontier_output["selected_profile"] = ""
+    for profile, candidate in hybrid_selected_candidates.items():
+        hybrid_frontier_output.loc[
+            hybrid_frontier_output["candidate"] == candidate,
+            "selected_profile",
+        ] = profile
+    frontier_output = pd.concat(
+        [frontier_output, cvar_frontier_output, hybrid_frontier_output],
+        ignore_index=True,
+    )
 
     outputs = {
         "trials": trials,
@@ -361,6 +504,11 @@ def run_experiment(
         "ctx": ctx,
         "classifications": classifications,
         "selections": selections,
+        "cvar_selections": cvar_selections,
+        "hybrid_selections": hybrid_selections,
+        "scenario_tail_overlay_fraction": (
+            hybrid_frontier.scenario_tail_overlay_fraction
+        ),
         "impact_bps": impact_bps,
         "linear_bps": linear_bps,
         "scenario_returns": returns,
@@ -450,10 +598,17 @@ def _behavior_metrics(
     return behavior, profile, pd.DataFrame(exposure_rows)
 
 
-def _simulated_returns(ctx: PlannerContext, n_scenarios: int, seed: int) -> np.ndarray:
+def _stress_residual_returns(
+    ctx: PlannerContext,
+    n_scenarios: int,
+    seed: int,
+) -> np.ndarray:
+    """Generate centered fat-tail residuals with asymmetric rebalance-call risk."""
+
     rng = np.random.default_rng(seed)
     draws = np.empty((n_scenarios, len(ctx.dates), len(ctx.symbols)), dtype=float)
     factor_exposure = np.asarray(ctx.factor_exposure, dtype=float)
+    degrees_of_freedom = 5.0
     for date_index in range(len(ctx.dates)):
         covariance = (
             factor_exposure[date_index]
@@ -461,12 +616,41 @@ def _simulated_returns(ctx: PlannerContext, n_scenarios: int, seed: int) -> np.n
             @ factor_exposure[date_index].T
             + np.diag(ctx.specific_variance[date_index])
         )
-        draws[:, date_index, :] = rng.multivariate_normal(
-            mean=ctx.expected_return[date_index],
+        gaussian = rng.multivariate_normal(
+            mean=np.zeros(len(ctx.symbols)),
             cov=covariance,
             size=n_scenarios,
         )
-    return draws
+        tail_scale = np.sqrt(
+            (degrees_of_freedom - 2.0)
+            / rng.chisquare(degrees_of_freedom, size=n_scenarios)
+        )
+        draws[:, date_index, :] = gaussian * tail_scale[:, None]
+
+    # A wrong rebalance call is a coherent loss across predicted additions and
+    # deletions. The frequent non-error state carries a small positive offset,
+    # keeping this mixture zero mean rather than creating hidden alpha.
+    wrong_call_probability = 0.10
+    wrong_call = rng.random(n_scenarios) < wrong_call_probability
+    state = np.where(
+        wrong_call,
+        -1.0,
+        wrong_call_probability / (1.0 - wrong_call_probability),
+    )
+    event_curve = np.array(
+        [0.0, 0.0, 0.0, 0.10, 0.25, 0.45, 0.70, 1.00, 1.35, 0.0]
+    )
+    target_sign = np.sign(
+        ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+    )
+    call_error_scale = 0.0035
+    draws += (
+        call_error_scale
+        * state[:, None, None]
+        * event_curve[None, :, None]
+        * target_sign[None, None, :]
+    )
+    return draws - np.mean(draws, axis=0, keepdims=True)
 
 
 def _scenario_pnl(
@@ -507,6 +691,12 @@ def _candidate_for_result(
 
 
 def _idea_for(trial: str) -> str:
+    if trial.startswith("cvar_profile_"):
+        return "Penalize worst-tail path P&L using centered fat-tail event scenarios."
+    if trial.startswith("hybrid_profile_"):
+        return "Automatically price covariance risk plus only the excess scenario tail."
+    if trial.startswith("hybrid_medium_"):
+        return "Add a scaled downside-CVaR overlay while retaining covariance factor risk."
     if trial.startswith("profile_"):
         return "Select the highest expected net P&L inside the desk risk budget."
     if trial == "reference_fixed_weight_no_alpha":
@@ -528,6 +718,78 @@ def _decision_for(row: pd.Series, trials: pd.DataFrame, parent_gross: float) -> 
         return "discard"
     if trial.startswith("profile_"):
         return "keep"
+    if trial.startswith("cvar_profile_"):
+        profile = trial.removeprefix("cvar_profile_")
+        baseline = trials.loc[trials["trial"] == f"profile_{profile}"].iloc[0]
+        economically_tied = (
+            row["expected_net_pnl_dollars"]
+            >= baseline["expected_net_pnl_dollars"] - parent_gross / 10_000.0
+        )
+        improves_tail = (
+            row["scenario_loss_cvar_95_mean_dollars"]
+            < baseline["scenario_loss_cvar_95_mean_dollars"]
+        )
+        respects_mechanics = (
+            row["urgent_first_trade_day"] <= baseline["urgent_first_trade_day"]
+            and row["early_factor_imbalance_pct"]
+            <= baseline["early_factor_imbalance_pct"] + 1.0
+        )
+        return (
+            "keep"
+            if economically_tied and improves_tail and respects_mechanics
+            else "discard"
+        )
+    if trial.startswith("hybrid_profile_"):
+        profile = trial.removeprefix("hybrid_profile_")
+        baseline = trials.loc[trials["trial"] == f"profile_{profile}"].iloc[0]
+        high_baseline = trials.loc[trials["trial"] == "profile_high"].iloc[0]
+        economically_tied = (
+            row["expected_net_pnl_dollars"]
+            >= baseline["expected_net_pnl_dollars"] - parent_gross / 10_000.0
+        )
+        improves_tail = (
+            row["scenario_loss_cvar_95_mean_dollars"]
+            < baseline["scenario_loss_cvar_95_mean_dollars"]
+        )
+        factor_ceiling = max(
+            baseline["early_factor_imbalance_pct"] + 1.0,
+            high_baseline["early_factor_imbalance_pct"],
+        )
+        respects_mechanics = (
+            row["urgent_first_trade_day"] <= baseline["urgent_first_trade_day"]
+            and row["small_first_trade_day"] >= baseline["small_first_trade_day"]
+            and row["early_factor_imbalance_pct"] <= factor_ceiling
+            and row["late_early_gross_ratio"]
+            >= 0.9 * baseline["late_early_gross_ratio"]
+        )
+        return (
+            "keep"
+            if economically_tied and improves_tail and respects_mechanics
+            else "discard"
+        )
+    if trial.startswith("hybrid_medium_"):
+        medium = trials.loc[trials["trial"] == "profile_medium"].iloc[0]
+        economically_tied = (
+            row["expected_net_pnl_dollars"]
+            >= medium["expected_net_pnl_dollars"] - parent_gross / 10_000.0
+        )
+        improves_tail = (
+            row["scenario_loss_cvar_95_mean_dollars"]
+            < medium["scenario_loss_cvar_95_mean_dollars"]
+        )
+        respects_mechanics = (
+            row["urgent_first_trade_day"] <= medium["urgent_first_trade_day"]
+            and row["small_first_trade_day"] >= medium["small_first_trade_day"]
+            and row["early_factor_imbalance_pct"]
+            <= medium["early_factor_imbalance_pct"] + 1.0
+            and row["late_early_gross_ratio"]
+            >= 0.9 * medium["late_early_gross_ratio"]
+        )
+        return (
+            "keep"
+            if economically_tied and improves_tail and respects_mechanics
+            else "discard"
+        )
     if trial == "reference_fixed_weight_no_alpha":
         return "baseline_only"
     medium = trials.loc[trials["trial"] == "profile_medium"].iloc[0]
@@ -570,22 +832,30 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
     trials = outputs["trials"].set_index("trial")
     frontier = outputs["frontier"]
     profiles = outputs["profiles"]
-    returns = metadata["scenario_returns"]
-    ctx = metadata["ctx"]
-    schedules = outputs["schedules"]
     colors = {"high": "#2F6B9A", "medium": "#D97732", "low": "#70A288"}
     fig, axes = plt.subplots(2, 2, figsize=(14.5, 10.0))
 
     axis = axes[0, 0]
-    solved = frontier[frontier["status"].isin(("optimal", "optimal_inaccurate"))]
-    axis.plot(
-        solved["pnl_vol_dollars"] / 1_000.0,
-        solved["expected_net_pnl_dollars"] / 1_000.0,
-        color="#8A929A",
-        linewidth=1.4,
-        marker="o",
-        markersize=3.5,
-    )
+    frontier_styles = {
+        "variance": ("#8A929A", "Variance frontier", "-"),
+        "hybrid_downside": ("#7C5C9E", "Automatic hybrid frontier", "-"),
+        "downside_cvar": ("#B7BDC3", "Pure CVaR frontier (discarded)", "--"),
+    }
+    for risk_measure, (color, label, line_style) in frontier_styles.items():
+        solved = frontier[
+            frontier["status"].isin(("optimal", "optimal_inaccurate"))
+            & (frontier["risk_measure"] == risk_measure)
+        ].sort_values("pnl_vol_dollars")
+        axis.plot(
+            solved["pnl_vol_dollars"] / 1_000.0,
+            solved["expected_net_pnl_dollars"] / 1_000.0,
+            color=color,
+            linewidth=1.4,
+            linestyle=line_style,
+            marker="o",
+            markersize=3.5,
+            label=label,
+        )
     for profile, color in colors.items():
         row = trials.loc[f"profile_{profile}"]
         axis.scatter(
@@ -593,29 +863,23 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
             row["expected_net_pnl_dollars"] / 1_000.0,
             s=70,
             color=color,
-            label=profile.title(),
+            label=f"Variance {profile}",
             zorder=4,
         )
-    event_row = trials.loc["medium_event_liquidity"]
-    axis.scatter(
-        event_row["pnl_vol_dollars"] / 1_000.0,
-        event_row["expected_net_pnl_dollars"] / 1_000.0,
-        s=105,
-        marker="*",
-        color="#7C5C9E",
-        label="Medium + event liquidity",
-        zorder=5,
-    )
-    scalar_row = trials.loc["medium_scalar_tca"]
-    axis.scatter(
-        scalar_row["pnl_vol_dollars"] / 1_000.0,
-        scalar_row["expected_net_pnl_dollars"] / 1_000.0,
-        s=80,
-        marker="X",
-        color="#59636E",
-        label="Medium + scalar TCA",
-        zorder=5,
-    )
+    for profile, color in colors.items():
+        row = trials.loc[f"hybrid_profile_{profile}"]
+        decision_suffix = " (discarded)" if row["decision"] == "discard" else ""
+        axis.scatter(
+            row["pnl_vol_dollars"] / 1_000.0,
+            row["expected_net_pnl_dollars"] / 1_000.0,
+            s=72,
+            marker="D",
+            facecolors="none",
+            edgecolors=color,
+            linewidths=1.7,
+            label=f"Hybrid {profile}{decision_suffix}",
+            zorder=5,
+        )
     axis.set_title("Expected net P&L versus accumulated P&L risk")
     axis.set_xlabel("P&L volatility ($000)")
     axis.set_ylabel("Expected net P&L ($000)")
@@ -623,18 +887,16 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
 
     axis = axes[0, 1]
     compare = [
-        "profile_high",
         "profile_medium",
-        "medium_scalar_tca",
-        "medium_event_liquidity",
-        "profile_low",
+        "hybrid_profile_medium",
+        "cvar_profile_medium",
+        "strong_event_liquidity",
     ]
     style = {
-        "profile_high": (colors["high"], "High risk aversion"),
-        "profile_medium": (colors["medium"], "Medium risk aversion"),
-        "medium_scalar_tca": ("#59636E", "Medium + scalar TCA"),
-        "medium_event_liquidity": ("#7C5C9E", "Medium + event liquidity"),
-        "profile_low": (colors["low"], "Low risk aversion"),
+        "profile_medium": (colors["medium"], "Variance medium"),
+        "hybrid_profile_medium": ("#7C5C9E", "Automatic hybrid medium"),
+        "cvar_profile_medium": ("#8A929A", "Pure CVaR medium (discarded)"),
+        "strong_event_liquidity": ("#2F6B9A", "Medium + forecast event liquidity"),
     }
     for trial in compare:
         curve = profiles[profiles["trial"] == trial].sort_values("date")
@@ -655,7 +917,9 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
 
     axis = axes[1, 0]
     for trial, color, label in (
-        ("profile_medium", colors["medium"], "Medium calibrated"),
+        ("profile_medium", colors["medium"], "Variance medium"),
+        ("hybrid_profile_medium", "#7C5C9E", "Automatic hybrid medium"),
+        ("cvar_profile_medium", "#B7BDC3", "Pure CVaR medium (discarded)"),
         ("medium_weight_no_factor", "#8A929A", "Same plan without factor risk"),
     ):
         curve = profiles[profiles["trial"] == trial].sort_values("date")
@@ -673,32 +937,30 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
     axis.legend(frameon=False)
 
     axis = axes[1, 1]
-    pnl_samples = []
-    labels = []
-    box_colors = []
-    for profile, color in colors.items():
-        trial = f"profile_{profile}"
-        schedule = schedules[schedules["trial"] == trial].drop(columns="trial")
-        row = trials.loc[trial]
-        cost_proxy = type(
-            "CostProxy",
-            (),
-            {
-                "impact_cost_dollars": row["impact_cost_dollars"],
-                "linear_cost_dollars": row["linear_cost_dollars"],
-            },
-        )()
-        samples = _scenario_pnl(ctx, schedule, cost_proxy, returns) / 1_000.0
-        pnl_samples.append(samples)
-        labels.append(profile.title())
-        box_colors.append(color)
-    boxes = axis.boxplot(pnl_samples, tick_labels=labels, showfliers=False, patch_artist=True)
-    for patch, color in zip(boxes["boxes"], box_colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.55)
-    axis.axhline(0.0, color="#6B7280", linewidth=1.0)
-    axis.set_title(f"Net P&L distribution · {N_SCENARIOS:,} common scenarios")
-    axis.set_ylabel("Net P&L ($000)")
+    tail_trials = [
+        "profile_medium",
+        "hybrid_profile_medium",
+        "cvar_profile_medium",
+        "strong_event_liquidity",
+    ]
+    labels = ["Variance", "Auto hybrid", "Pure CVaR", "Event liquidity"]
+    bar_colors = [colors["medium"], "#7C5C9E", "#B7BDC3", "#2F6B9A"]
+    tail_rows = trials.loc[tail_trials]
+    values = tail_rows["scenario_loss_cvar_95_mean_dollars"].to_numpy(float) / 1_000_000.0
+    errors = tail_rows["scenario_loss_cvar_95_std_dollars"].to_numpy(float) / 1_000_000.0
+    bars = axis.bar(labels, values, yerr=errors, capsize=3, color=bar_colors, alpha=0.72)
+    for bar, (_, row) in zip(bars, tail_rows.iterrows()):
+        axis.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            bar.get_height() + 0.12,
+            f"net ${row['expected_net_pnl_dollars'] / 1_000.0:.0f}k",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+    axis.set_title(f"95% loss CVaR · 5 × {N_SCENARIOS:,} independent scenarios")
+    axis.set_ylabel("Mean loss CVaR ($m, lower is better)")
+    axis.tick_params(axis="x", labelrotation=12)
 
     for axis in axes.ravel():
         axis.grid(axis="y", color="#E1E5E8", linewidth=0.7)
@@ -735,6 +997,10 @@ def main() -> None:
     print(outputs["trials"].round(4).to_string(index=False))
     print(f"\nimpact_bps_at_10pct_adv: {metadata['impact_bps']:.4f}")
     print(f"linear_cost_bps: {metadata['linear_bps']:.4f}")
+    print(
+        "scenario_tail_overlay_fraction: "
+        f"{metadata['scenario_tail_overlay_fraction']:.6f}"
+    )
     print(f"artifacts: {prefix.parent / (prefix.name + '*')}")
 
 

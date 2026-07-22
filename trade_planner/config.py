@@ -8,6 +8,7 @@ from typing import Any
 from .alpha import InventoryAlphaModel
 from .constraints import ConstraintPlugin, default_constraints
 from .costs import CompositeCostModel, LinearBpsCost, QuadraticParticipationImpact
+from .downside import InventoryPathRiskModel
 from .participation import AdaptiveAnnouncementParticipation, ParticipationCapModel
 from .risk import BarraFactorRiskModel, ExponentialEarningsRiskOverlay, RiskModel
 
@@ -23,12 +24,20 @@ class TradePlannerConfig:
     solver: Any = "OSQP"
     inventory_risk_weight: float = 0.0
     inventory_alpha_model: InventoryAlphaModel | None = None
+    inventory_path_risk_weight: float = 0.0
+    inventory_path_risk_model: InventoryPathRiskModel | None = None
 
     def __post_init__(self) -> None:
         if self.residual_risk_weight < 0:
             raise ValueError("residual_risk_weight must be non-negative")
         if self.inventory_risk_weight < 0:
             raise ValueError("inventory_risk_weight must be non-negative")
+        if self.inventory_path_risk_weight < 0:
+            raise ValueError("inventory_path_risk_weight must be non-negative")
+        if self.inventory_path_risk_weight > 0 and self.inventory_path_risk_model is None:
+            raise ValueError(
+                "inventory_path_risk_model is required when inventory_path_risk_weight is positive"
+            )
 
 
 def default_earnings_aware_config() -> TradePlannerConfig:
