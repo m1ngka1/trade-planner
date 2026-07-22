@@ -102,11 +102,13 @@ from .participation import (
 )
 from .planner import TradePlanner, TradePlannerResult
 from .policy_calibration import (
+    DEFAULT_CONTEXTUAL_RIDGE_MULTIPLIERS,
     FALLBACK_AGGRESSIVENESS,
     PROFILE_CONFIDENCE,
     AutomaticRiskProfileCalibration,
     InvestmentPolicyCoefficients,
     build_monotone_policy_ladder,
+    calibrate_contextual_risk_profiles_walk_forward,
     calibrate_risk_profiles_walk_forward,
     summarize_risk_profile_selections,
 )
@@ -145,6 +147,7 @@ __all__ = [
     "DailyGrossNotionalLimit",
     "DailyNetNotionalLimit",
     "DEFAULT_MAX_OPTIMIZATION_SCENARIOS",
+    "DEFAULT_CONTEXTUAL_RIDGE_MULTIPLIERS",
     "DEFAULT_MIN_TRAINING_EVENTS",
     "DEFAULT_RISK_PREFERENCES",
     "DirectionConstraint",
@@ -205,6 +208,7 @@ __all__ = [
     "build_context_from_provider",
     "build_rebalance_frontier",
     "calibrate_alpha_decay_walk_forward",
+    "calibrate_contextual_risk_profiles_walk_forward",
     "calibrate_risk_profiles_walk_forward",
     "calibrate_rebalance_plan",
     "centered_return_scenarios",

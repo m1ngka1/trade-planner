@@ -25,7 +25,8 @@ therefore a research challenger, not a production default.
 | 3 | Numerically scaled execution formulation | Implemented / deployment-critical | The exact quadratic P&L floor now solves on spent events 25–26 under explicit CLARABEL. Both floors clear and cap, direction, completion, and urgency certificates pass. The investment candidate still fails volatility, small-order, and factor gates, so only the numerical formulation is kept. | Use per-name scaling and strict raw-share certificates in the real historical replay. Extend backend-specific certification only when another production solver is actually required; do not use the mechanics pass as profit evidence. |
 | 4 | Risk-scaled minimax liquidity challenger | High for swing, unproven for profit | Fresh validation cut volatility 5.49 bp and loss-CVaR 16.08 bp; untouched holdout cut volatility 8.08 bp and loss-CVaR 14.75 bp, but lost 3.24 bp/event. | Preserve as a challenger for real-data replay. Do not promote or tune against spent synthetic holdouts. |
 | 5 | Automatic High/Medium/Low calibration from real economics | Implemented mechanics / high | The chronological selector rejects hard/behavior failures, requires confidence-adjusted positive P&L, applies realized downside budgets, and preserves monotone profile ordering. Its controlled Low policy gained 0.33 bp/event and cut volatility 0.49 bp; this is not real evidence. | Generate the predeclared policy panel on the frozen real development bundle and select profiles without changing the ladder or investment gates. Only a successful real holdout can replace the fixed fallback map. |
-| 6 | More synthetic penalty or threshold tuning | Low | Confidence haircuts, uncertainty budgets, recourse, proximal terms, profit floors, plan-selection gates, baseline-relative regret risk, and the systematic-first specific-risk split all failed or were numerically unstable. The latest split improved factor balance but lost another 0.78 bp/event versus its control and worsened CVaR. | Defer until real-data error analysis identifies a specific missing risk or constraint. Avoid blind sweeps. |
+| 6 | Contextual event-policy selection | Mechanics proven for P&L, incomplete for risk | Point-in-time features raised controlled Medium/Low P&L by 0.73 bp/event and adapted Low aggressiveness by 0.54, but volatility rose 0.63 bp for Medium and 1.35 bp for Low. The P&L-only selector is discarded. | If pursued before real data arrives, predeclare one conditional-downside certainty-equivalent experiment. Do not tune the P&L-only model or integrate it into historical defaults. |
+| 7 | More synthetic penalty or threshold tuning | Low | Confidence haircuts, uncertainty budgets, recourse, proximal terms, profit floors, plan-selection gates, baseline-relative regret risk, and the systematic-first specific-risk split all failed or were numerically unstable. The latest split improved factor balance but lost another 0.78 bp/event versus its control and worsened CVaR. | Defer until real-data error analysis identifies a specific missing risk or constraint. Avoid blind sweeps. |
 
 ## Experimental automatic policy map
 
@@ -49,7 +50,7 @@ chooses the complete schedule.
 
 ## Evidence map
 
-- `artifacts/walkforward_research_ledger.csv`: compact index of all 50 recorded
+- `artifacts/walkforward_research_ledger.csv`: compact index of all 51 recorded
   screens, development runs, holdouts, crashes, and decisions.
 - `artifacts/liquidity_minimax_factor_dev*` and
   `artifacts/liquidity_minimax_factor_holdout*`: full-shape minimax evidence.
@@ -80,6 +81,10 @@ chooses the complete schedule.
   `artifacts/systematic_first_risk_spent*`: predeclared factor-versus-specific
   risk ablation, automatic profile coefficient, hard sealed-cohort guard,
   full risk decomposition, failed economic gates, and six-panel visual.
+- `docs/contextual_risk_profile_calibration.md` and
+  `artifacts/contextual_risk_profile_mechanics*`: point-in-time feature model,
+  nested ridge selection, exact leakage audit, P&L improvement, failed
+  volatility gate, and six-panel review visualization.
 
 ## Production decision rule
 

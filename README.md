@@ -430,6 +430,15 @@ volume ramp worsened, and a hard cap certificate failed. The idea is recorded
 and discarded; no default coefficient or schedule changed. See
 [Systematic-first inventory risk](docs/systematic_first_risk.md).
 
+A separate controlled contextual selector learned which complete policy vector
+fit the current event's capacity, alpha-to-cost, liquidity-ramp, factor, and
+forecast-uncertainty state. It improved Medium/Low P&L by 0.73 bp/event and was
+exactly leakage-safe, but raised volatility by 0.63 bp for Medium and 1.35 bp
+for Low. Because the objective is joint profitability and swing reduction, the
+P&L-only contextual model is recorded and discarded rather than added to the
+historical default. See
+[Contextual policy calibration](docs/contextual_risk_profile_calibration.md).
+
 The deployment path also supports per-name numerical scaling: objectives keep
 their exact dollar economics in parent-order units, built-in hard constraints
 are dimensionless, and every result receives an independent raw-share cap,
@@ -443,6 +452,8 @@ See [Point-in-time rebalance replay](docs/point_in_time_walkforward.md) for the
 data contract, every trial, keep/discard logic, and visual artifacts.
 See [Research priorities](docs/research_priorities.md) for the ranked next work,
 automatic High/Medium/Low coefficient map, and current production decision.
+For takeover, use the [complete 51-experiment table](docs/experiment_summary_table.md)
+and the [implementation and results handoff](docs/experiment_details.md).
 
 ## CVXPY Model Diagnostics
 

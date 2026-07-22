@@ -14,6 +14,7 @@ from .calibration import DEFAULT_RISK_PREFERENCES, RiskAversion
 
 
 PROFILE_ORDER = (RiskAversion.HIGH, RiskAversion.MEDIUM, RiskAversion.LOW)
+DEFAULT_CONTEXTUAL_RIDGE_MULTIPLIERS = (0.01, 0.10, 1.0, 10.0, 100.0)
 PROFILE_CONFIDENCE: Mapping[RiskAversion, float] = {
     RiskAversion.HIGH: 0.975,
     RiskAversion.MEDIUM: 0.75,
@@ -294,11 +295,229 @@ def calibrate_risk_profiles_walk_forward(
     )
 
 
+def calibrate_contextual_risk_profiles_walk_forward(
+    events: pd.DataFrame,
+    trials: pd.DataFrame,
+    policies: pd.DataFrame,
+    *,
+    feature_columns: Sequence[str],
+    min_training_events: int = 12,
+    minimum_behavior_pass_rate: float = 0.95,
+    materiality_bps: float = 1.0,
+    ridge_multipliers: Sequence[float] = DEFAULT_CONTEXTUAL_RIDGE_MULTIPLIERS,
+) -> AutomaticRiskProfileCalibration:
+    """Select complete policies from point-in-time event-conditioned P&L.
+
+    Operational eligibility and realized-risk budgets still use eligible
+    historical outcomes. Only the expected P&L ranking is conditioned on the
+    current event's planning-time features. Current and future outcomes are
+    attached after selection and never enter feature scaling or ridge fitting.
+    """
+
+    if min_training_events < 4:
+        raise ValueError("min_training_events must be at least four")
+    if not feature_columns:
+        raise ValueError("feature_columns must contain at least one feature")
+    feature_names = tuple(str(column) for column in feature_columns)
+    if len(set(feature_names)) != len(feature_names):
+        raise ValueError("feature_columns must be unique")
+    multipliers = np.asarray(list(ridge_multipliers), dtype=float)
+    if (
+        multipliers.ndim != 1
+        or len(multipliers) == 0
+        or not np.all(np.isfinite(multipliers))
+        or np.any(multipliers <= 0.0)
+        or len(np.unique(multipliers)) != len(multipliers)
+    ):
+        raise ValueError(
+            "ridge_multipliers must contain unique finite positive values"
+        )
+    if not 0.0 <= minimum_behavior_pass_rate <= 1.0:
+        raise ValueError("minimum_behavior_pass_rate must be between zero and one")
+    if not np.isfinite(materiality_bps) or materiality_bps < 0.0:
+        raise ValueError("materiality_bps must be non-negative and finite")
+
+    event_frame, trial_frame, policy_frame = _validated_inputs(
+        events,
+        trials,
+        policies,
+    )
+    missing_features = set(feature_names).difference(event_frame.columns)
+    if missing_features:
+        raise ValueError(
+            f"events is missing contextual features: {sorted(missing_features)}"
+        )
+    for column in feature_names:
+        event_frame[column] = pd.to_numeric(event_frame[column], errors="raise")
+        if not np.isfinite(event_frame[column].to_numpy(float)).all():
+            raise ValueError(f"events.{column} must be finite")
+
+    fallback = _fallback_policy_ids(policy_frame)
+    event_by_id = event_frame.set_index("event_id")
+    selection_rows: list[dict[str, object]] = []
+    evaluation_frames: list[pd.DataFrame] = []
+    prior_events: list[pd.Series] = []
+
+    for current in event_frame.itertuples(index=False):
+        current_id = str(current.event_id)
+        current_cutoff = pd.Timestamp(current.information_cutoff)
+        eligible_ids = tuple(
+            str(prior["event_id"])
+            for prior in prior_events
+            if pd.Timestamp(prior["realized_available_at"]) <= current_cutoff
+        )
+        current_features = np.asarray(
+            [float(getattr(current, column)) for column in feature_names],
+            dtype=float,
+        )
+        if len(eligible_ids) < min_training_events:
+            selected_by_profile = {
+                profile: {
+                    "selected_policy_id": fallback[profile],
+                    "status": "fallback_contextual_warmup",
+                    "economically_viable": False,
+                    "net_pnl_lower_bound_bps": np.nan,
+                    "realized_risk_bps": np.nan,
+                    "realized_risk_budget_bps": np.nan,
+                    "predicted_net_pnl_bps": np.nan,
+                    "prediction_standard_error_bps": np.nan,
+                    "contextual_ridge_multiplier": np.nan,
+                    "contextual_cv_rmse_bps": np.nan,
+                }
+                for profile in PROFILE_ORDER
+            }
+        else:
+            history = trial_frame.loc[
+                trial_frame["event_id"].isin(eligible_ids)
+            ].copy()
+            statistics = _policy_statistics(history, policy_frame)
+            feature_history = event_by_id.loc[
+                list(eligible_ids),
+                list(feature_names),
+            ].to_numpy(float)
+            predictions = _contextual_policy_predictions(
+                feature_history,
+                history,
+                policy_frame,
+                current_features,
+                feature_names=feature_names,
+                ridge_multipliers=multipliers,
+            )
+            statistics = statistics.merge(
+                predictions,
+                on="policy_id",
+                validate="one_to_one",
+            )
+            selected_by_profile, profile_evaluations = (
+                _select_contextual_profiles(
+                    statistics,
+                    minimum_behavior_pass_rate=minimum_behavior_pass_rate,
+                    materiality_bps=materiality_bps,
+                )
+            )
+            for profile, evaluation in profile_evaluations.items():
+                evaluation_frames.append(
+                    evaluation.assign(
+                        event_id=current_id,
+                        as_of=pd.Timestamp(current.as_of),
+                        information_cutoff=current_cutoff,
+                        risk_aversion=profile.value,
+                        training_event_ids="|".join(eligible_ids),
+                        **{
+                            f"current_feature_{column}": value
+                            for column, value in zip(
+                                feature_names,
+                                current_features,
+                            )
+                        },
+                    )
+                )
+
+        current_outcomes = trial_frame.loc[
+            trial_frame["event_id"].eq(current_id)
+        ].set_index("policy_id")
+        for profile in PROFILE_ORDER:
+            selected = selected_by_profile[profile]
+            selected_policy_id = str(selected["selected_policy_id"])
+            fallback_policy_id = fallback[profile]
+            selected_outcome = current_outcomes.loc[selected_policy_id]
+            fallback_outcome = current_outcomes.loc[fallback_policy_id]
+            policy = policy_frame.set_index("policy_id").loc[selected_policy_id]
+            selection_rows.append(
+                {
+                    "event_id": current_id,
+                    "as_of": pd.Timestamp(current.as_of),
+                    "information_cutoff": current_cutoff,
+                    "risk_aversion": profile.value,
+                    "status": selected["status"],
+                    "economically_viable": bool(selected["economically_viable"]),
+                    "training_event_count": len(eligible_ids),
+                    "training_event_ids": "|".join(eligible_ids),
+                    "selected_policy_id": selected_policy_id,
+                    "fallback_policy_id": fallback_policy_id,
+                    "profile_confidence": PROFILE_CONFIDENCE[profile],
+                    "predicted_net_pnl_bps": selected[
+                        "predicted_net_pnl_bps"
+                    ],
+                    "prediction_standard_error_bps": selected[
+                        "prediction_standard_error_bps"
+                    ],
+                    "net_pnl_lower_bound_bps": selected[
+                        "net_pnl_lower_bound_bps"
+                    ],
+                    "realized_risk_bps": selected["realized_risk_bps"],
+                    "realized_risk_budget_bps": selected[
+                        "realized_risk_budget_bps"
+                    ],
+                    "contextual_ridge_multiplier": selected[
+                        "contextual_ridge_multiplier"
+                    ],
+                    "contextual_cv_rmse_bps": selected[
+                        "contextual_cv_rmse_bps"
+                    ],
+                    **{
+                        f"current_feature_{column}": value
+                        for column, value in zip(feature_names, current_features)
+                    },
+                    **{
+                        column: float(policy[column])
+                        for column in POLICY_COEFFICIENT_COLUMNS
+                    },
+                    "selected_net_pnl_bps": float(selected_outcome["net_pnl_bps"]),
+                    "fallback_net_pnl_bps": float(fallback_outcome["net_pnl_bps"]),
+                    "selected_within_event_drawdown_bps": float(
+                        selected_outcome["within_event_max_drawdown_bps"]
+                    ),
+                    "fallback_within_event_drawdown_bps": float(
+                        fallback_outcome["within_event_max_drawdown_bps"]
+                    ),
+                    "selected_hard_pass": bool(selected_outcome["hard_pass"]),
+                    "selected_behavior_pass": bool(
+                        selected_outcome["behavior_pass"]
+                    ),
+                }
+            )
+        prior_events.append(pd.Series(current._asdict()))
+
+    selections = pd.DataFrame(selection_rows)
+    evaluations = (
+        pd.concat(evaluation_frames, ignore_index=True)
+        if evaluation_frames
+        else pd.DataFrame()
+    )
+    return AutomaticRiskProfileCalibration(
+        selections=selections,
+        policy_evaluations=evaluations,
+        summary=summarize_risk_profile_selections(selections),
+        policies=policy_frame.copy(),
+    )
+
+
 def summarize_risk_profile_selections(selections: pd.DataFrame) -> pd.DataFrame:
     """Summarize out-of-sample calibrated policy economics by risk label."""
 
     calibrated = selections.loc[
-        selections["status"].str.startswith("calibrated")
+        selections["status"].str.startswith(("calibrated", "contextual"))
     ].copy()
     rows: list[dict[str, object]] = []
     for profile in PROFILE_ORDER:
@@ -354,6 +573,232 @@ def summarize_risk_profile_selections(selections: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _contextual_policy_predictions(
+    feature_history: np.ndarray,
+    history: pd.DataFrame,
+    policies: pd.DataFrame,
+    current_features: np.ndarray,
+    *,
+    feature_names: Sequence[str],
+    ridge_multipliers: np.ndarray,
+) -> pd.DataFrame:
+    event_order = list(dict.fromkeys(history["event_id"].astype(str)))
+    policy_order = policies["policy_id"].astype(str).tolist()
+    outcomes = (
+        history.pivot(index="event_id", columns="policy_id", values="net_pnl_bps")
+        .reindex(index=event_order, columns=policy_order)
+        .to_numpy(float)
+    )
+    features = np.asarray(feature_history, dtype=float)
+    current = np.asarray(current_features, dtype=float)
+    if features.shape != (len(event_order), len(feature_names)):
+        raise ValueError("feature history must align with eligible event history")
+    if current.shape != (len(feature_names),):
+        raise ValueError("current features must align with feature_columns")
+    if not np.all(np.isfinite(outcomes)):
+        raise ValueError("contextual policy outcomes must be finite and complete")
+
+    cv_rows: list[tuple[float, float]] = []
+    for multiplier in ridge_multipliers:
+        squared_errors: list[np.ndarray] = []
+        for held_out in range(len(features)):
+            keep = np.arange(len(features)) != held_out
+            prediction, _, _, _, _, _ = _fit_contextual_ridge(
+                features[keep],
+                outcomes[keep],
+                features[held_out],
+                float(multiplier),
+            )
+            squared_errors.append(np.square(prediction - outcomes[held_out]))
+        cv_rows.append(
+            (
+                float(multiplier),
+                float(np.sqrt(np.mean(np.vstack(squared_errors)))),
+            )
+        )
+    selected_multiplier, cv_rmse = min(cv_rows, key=lambda row: (row[1], row[0]))
+    (
+        prediction,
+        prediction_error,
+        feature_mean,
+        feature_scale,
+        leverage,
+        residual_std,
+    ) = _fit_contextual_ridge(
+        features,
+        outcomes,
+        current,
+        selected_multiplier,
+    )
+    rows: list[dict[str, object]] = []
+    for policy_index, policy_id in enumerate(policy_order):
+        rows.append(
+            {
+                "policy_id": policy_id,
+                "predicted_net_pnl_bps": float(prediction[policy_index]),
+                "prediction_standard_error_bps": float(
+                    prediction_error[policy_index]
+                ),
+                "contextual_ridge_multiplier": selected_multiplier,
+                "contextual_cv_rmse_bps": cv_rmse,
+                "contextual_leverage": leverage,
+                "contextual_residual_std_bps": float(
+                    residual_std[policy_index]
+                ),
+                **{
+                    f"training_feature_mean_{name}": float(value)
+                    for name, value in zip(feature_names, feature_mean)
+                },
+                **{
+                    f"training_feature_scale_{name}": float(value)
+                    for name, value in zip(feature_names, feature_scale)
+                },
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _fit_contextual_ridge(
+    features: np.ndarray,
+    outcomes: np.ndarray,
+    prediction_features: np.ndarray,
+    multiplier: float,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    float,
+    np.ndarray,
+]:
+    feature_mean = np.mean(features, axis=0)
+    feature_scale = np.std(features, axis=0, ddof=0)
+    feature_scale = np.where(feature_scale > 1e-12, feature_scale, 1.0)
+    standardized = (features - feature_mean) / feature_scale
+    current = (prediction_features - feature_mean) / feature_scale
+    design = np.column_stack([np.ones(len(features)), standardized])
+    current_design = np.concatenate([[1.0], current])
+    penalty = np.diag(np.concatenate([[0.0], np.ones(features.shape[1])]))
+    information = design.T @ design + multiplier * penalty
+    inverse = np.linalg.pinv(information, rcond=1e-12)
+    coefficients = inverse @ design.T @ outcomes
+    prediction = current_design @ coefficients
+    residuals = outcomes - design @ coefficients
+    degrees_of_freedom = max(len(features) - design.shape[1], 1)
+    residual_std = np.sqrt(np.sum(np.square(residuals), axis=0) / degrees_of_freedom)
+    leverage = float(max(current_design @ inverse @ current_design, 0.0))
+    prediction_error = residual_std * np.sqrt(1.0 + leverage)
+    return (
+        np.asarray(prediction, dtype=float),
+        np.asarray(prediction_error, dtype=float),
+        np.asarray(feature_mean, dtype=float),
+        np.asarray(feature_scale, dtype=float),
+        leverage,
+        np.asarray(residual_std, dtype=float),
+    )
+
+
+def _select_contextual_profiles(
+    statistics: pd.DataFrame,
+    *,
+    minimum_behavior_pass_rate: float,
+    materiality_bps: float,
+) -> tuple[
+    dict[RiskAversion, dict[str, object]],
+    dict[RiskAversion, pd.DataFrame],
+]:
+    selected: dict[RiskAversion, dict[str, object]] = {}
+    evaluations: dict[RiskAversion, pd.DataFrame] = {}
+    minimum_aggressiveness = -np.inf
+    for profile in PROFILE_ORDER:
+        confidence = PROFILE_CONFIDENCE[profile]
+        z_score = NormalDist().inv_cdf(confidence)
+        evaluation = statistics.copy()
+        evaluation["risk_aversion"] = profile.value
+        evaluation["profile_confidence"] = confidence
+        evaluation["net_pnl_lower_bound_bps"] = (
+            evaluation["predicted_net_pnl_bps"]
+            - z_score * evaluation["prediction_standard_error_bps"]
+        )
+        evaluation["monotonic_policy_eligible"] = evaluation[
+            "policy_aggressiveness"
+        ].ge(minimum_aggressiveness - 1e-12)
+        evaluation["operationally_eligible"] = (
+            evaluation["hard_pass_all"]
+            & evaluation["behavior_pass_rate"].ge(minimum_behavior_pass_rate)
+            & evaluation["monotonic_policy_eligible"]
+        )
+        evaluation["profit_eligible"] = (
+            evaluation["operationally_eligible"]
+            & evaluation["net_pnl_lower_bound_bps"].ge(0.0)
+        )
+        profitable = evaluation.loc[evaluation["profit_eligible"]].copy()
+        if not profitable.empty:
+            pool = profitable
+            status = "contextual_profitable"
+            economically_viable = True
+        else:
+            pool = evaluation.loc[evaluation["operationally_eligible"]].copy()
+            status = "contextual_no_profitable_policy"
+            economically_viable = False
+        if pool.empty:
+            pool = evaluation.loc[evaluation["monotonic_policy_eligible"]].copy()
+            status = "contextual_no_operational_policy"
+            economically_viable = False
+        min_risk = float(pool["realized_risk_bps"].min())
+        max_risk = float(pool["realized_risk_bps"].max())
+        risk_fraction = DEFAULT_RISK_PREFERENCES[profile].risk_frontier_fraction
+        risk_budget = min_risk + risk_fraction * (max_risk - min_risk)
+        inside_budget = pool.loc[
+            pool["realized_risk_bps"].le(
+                risk_budget + max(1e-12, abs(risk_budget) * 1e-12)
+            )
+        ].copy()
+        best_lower_bound = float(inside_budget["net_pnl_lower_bound_bps"].max())
+        tied = inside_budget.loc[
+            inside_budget["net_pnl_lower_bound_bps"].ge(
+                best_lower_bound - materiality_bps
+            )
+        ]
+        chosen = tied.sort_values(
+            [
+                "realized_risk_bps",
+                "policy_aggressiveness",
+                "net_pnl_lower_bound_bps",
+                "predicted_net_pnl_bps",
+            ],
+            ascending=[True, True, False, False],
+        ).iloc[0]
+        policy_id = str(chosen["policy_id"])
+        evaluation["realized_risk_budget_bps"] = risk_budget
+        evaluation["within_realized_risk_budget"] = (
+            evaluation["realized_risk_bps"]
+            <= risk_budget + max(1e-12, abs(risk_budget) * 1e-12)
+        )
+        evaluation["selected"] = evaluation["policy_id"].eq(policy_id)
+        evaluations[profile] = evaluation
+        selected[profile] = {
+            "selected_policy_id": policy_id,
+            "status": status,
+            "economically_viable": economically_viable,
+            "predicted_net_pnl_bps": float(chosen["predicted_net_pnl_bps"]),
+            "prediction_standard_error_bps": float(
+                chosen["prediction_standard_error_bps"]
+            ),
+            "net_pnl_lower_bound_bps": float(
+                chosen["net_pnl_lower_bound_bps"]
+            ),
+            "realized_risk_bps": float(chosen["realized_risk_bps"]),
+            "realized_risk_budget_bps": risk_budget,
+            "contextual_ridge_multiplier": float(
+                chosen["contextual_ridge_multiplier"]
+            ),
+            "contextual_cv_rmse_bps": float(chosen["contextual_cv_rmse_bps"]),
+        }
+        minimum_aggressiveness = float(chosen["policy_aggressiveness"])
+    return selected, evaluations
 
 
 def _select_profiles(

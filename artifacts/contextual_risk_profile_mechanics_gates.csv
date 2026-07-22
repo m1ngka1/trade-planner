@@ -1,0 +1,11 @@
+gate,threshold,observed,passed
+current_and_future_outcomes_are_inaccessible,exactly invariant,True,True
+twelve_event_warmup_uses_fallback,first twelve events,True,True
+hard_and_behavior_failures_are_excluded,never selected,True,True
+profile_aggressiveness_is_monotonic,high <= medium <= low,True,True
+medium_low_pnl_improves_050bp,>= 0.50 bp/event,0.7253297943411876,True
+no_profile_loses_more_than_025bp,>= -0.25 bp/event,0.0,True
+profile_volatility_within_050bp,<= +0.50 bp,1.3482653963240008,False
+positive_pnl_and_all_hard_pass,positive P&L and 100% hard pass,True,True
+low_profile_adapts_to_opportunity,>= 0.15 aggressiveness difference,0.538888888888889,True
+full_repository_test_suite,all tests pass,True,True
