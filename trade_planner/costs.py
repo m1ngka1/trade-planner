@@ -66,6 +66,58 @@ class LinearBpsCost:
 
 
 @dataclass(frozen=True)
+class TCAQuadraticParticipationImpact:
+    """Date-by-name quadratic impact calibrated from TCA forecasts."""
+
+    impact_bps_at_10pct_adv: np.ndarray
+
+    def objective(self, trade: cp.Expression, ctx: PlannerContext, date_index: int) -> cp.Expression:
+        forecasts = _cost_forecast_row(
+            self.impact_bps_at_10pct_adv,
+            ctx,
+            date_index,
+            "impact_bps_at_10pct_adv",
+        )
+        price = ctx.price[date_index]
+        adv = safe_numeric(ctx.adv_shares[date_index])
+        eta = (forecasts / 10_000.0) * price / safe_numeric(0.10 * adv)
+        return cp.sum(cp.multiply(eta, cp.square(trade)))
+
+
+@dataclass(frozen=True)
+class TCALinearBpsCost:
+    """Date-by-name spread, commission, fee, and borrow-like linear cost."""
+
+    linear_cost_bps: np.ndarray
+
+    def objective(self, trade: cp.Expression, ctx: PlannerContext, date_index: int) -> cp.Expression:
+        forecasts = _cost_forecast_row(
+            self.linear_cost_bps,
+            ctx,
+            date_index,
+            "linear_cost_bps",
+        )
+        price = ctx.price[date_index]
+        return cp.sum(cp.multiply((forecasts / 10_000.0) * price, cp.abs(trade)))
+
+
+def _cost_forecast_row(
+    values: np.ndarray,
+    ctx: PlannerContext,
+    date_index: int,
+    name: str,
+) -> np.ndarray:
+    matrix = np.asarray(values, dtype=float)
+    expected_shape = (len(ctx.dates), len(ctx.symbols))
+    if matrix.shape != expected_shape:
+        raise ValueError(f"{name} shape {matrix.shape} does not match {expected_shape}")
+    row = matrix[date_index]
+    if not np.all(np.isfinite(row)) or np.any(row < 0):
+        raise ValueError(f"{name} must contain finite non-negative values")
+    return row
+
+
+@dataclass(frozen=True)
 class EarningsLinearPenalty:
     """
     Optional soft penalty for trading near earnings.

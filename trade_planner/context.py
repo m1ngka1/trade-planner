@@ -72,4 +72,7 @@ class PlannerContext:
     factor_exposure: Array | None = None
     factor_covariance: Array | None = None
     specific_variance: Array | None = None
+    expected_return: Array | None = None
+    impact_bps_at_10pct_adv: Array | None = None
+    linear_cost_bps: Array | None = None
     metadata: dict[str, object] = field(default_factory=dict)

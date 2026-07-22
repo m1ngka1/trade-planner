@@ -1,6 +1,20 @@
 """Pluggable daily basket execution planner."""
 
+from .alpha import ExpectedReturnAlphaModel, InventoryAlphaModel
 from .analytics import cumulative_side_completion
+from .calibration import (
+    DEFAULT_RISK_PREFERENCES,
+    CalibratedRebalancePlan,
+    RebalanceEconomicMetrics,
+    RebalanceFrontier,
+    RiskAversion,
+    RiskPreference,
+    build_rebalance_frontier,
+    calibrate_rebalance_plan,
+    evaluate_rebalance_schedule,
+    infer_execution_cost_matrices,
+    infer_execution_costs,
+)
 from .config import (
     TradePlannerConfig,
     default_earnings_aware_config,
@@ -26,7 +40,14 @@ from .constraints import (
     with_variable_diagnostics,
 )
 from .context import PlannerContext, days_to_next_event
-from .costs import CompositeCostModel, EarningsLinearPenalty, LinearBpsCost, QuadraticParticipationImpact
+from .costs import (
+    CompositeCostModel,
+    EarningsLinearPenalty,
+    LinearBpsCost,
+    QuadraticParticipationImpact,
+    TCALinearBpsCost,
+    TCAQuadraticParticipationImpact,
+)
 from .data import (
     FactorRiskData,
     PlannerDataProvider,
@@ -67,18 +88,22 @@ __all__ = [
     "AnnouncementParticipationCurve",
     "AnnouncementParticipationModifier",
     "CompositeCostModel",
+    "CalibratedRebalancePlan",
     "ConstraintDiagnostics",
     "ConstraintPlugin",
     "DiagnosticMOSEK",
     "DailyGrossNotionalLimit",
     "DailyNetNotionalLimit",
+    "DEFAULT_RISK_PREFERENCES",
     "DirectionConstraint",
     "EarningsLinearPenalty",
+    "ExpectedReturnAlphaModel",
     "ExponentialEarningsRiskOverlay",
     "FactorRiskData",
     "FactorExposureLimit",
     "HardCompletionConstraint",
     "InfeasiblePlanError",
+    "InventoryAlphaModel",
     "LinearBpsCost",
     "LogisticEarningsParticipation",
     "MinCompletionByDate",
@@ -89,9 +114,15 @@ __all__ = [
     "PlannerContext",
     "PlannerDataProvider",
     "QuadraticParticipationImpact",
+    "RebalanceEconomicMetrics",
+    "RebalanceFrontier",
+    "RiskAversion",
     "RiskModel",
+    "RiskPreference",
     "SpecificRiskOverlay",
     "StaticCovarianceRiskModel",
+    "TCALinearBpsCost",
+    "TCAQuadraticParticipationImpact",
     "TradePlanner",
     "TradePlannerConfig",
     "TradePlannerResult",
@@ -105,6 +136,8 @@ __all__ = [
     "build_market_panel_from_provider",
     "build_planner_dates",
     "build_context_from_provider",
+    "build_rebalance_frontier",
+    "calibrate_rebalance_plan",
     "cumulative_side_completion",
     "days_to_next_event",
     "default_constraints",
@@ -112,10 +145,13 @@ __all__ = [
     "default_rebalance_aware_config",
     "diagnose_infeasible_problem",
     "diagnose_problem",
+    "evaluate_rebalance_schedule",
     "format_diagnosis",
     "format_infeasibility_diagnosis",
     "get_constraint_diagnostics",
     "get_variable_diagnostics",
+    "infer_execution_costs",
+    "infer_execution_cost_matrices",
     "normalize_orders",
     "with_diagnostics",
     "with_variable_diagnostics",

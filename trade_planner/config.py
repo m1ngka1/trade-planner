@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .alpha import InventoryAlphaModel
 from .constraints import ConstraintPlugin, default_constraints
 from .costs import CompositeCostModel, LinearBpsCost, QuadraticParticipationImpact
 from .participation import AdaptiveAnnouncementParticipation, ParticipationCapModel
@@ -21,6 +22,7 @@ class TradePlannerConfig:
     terminal_penalty: float | None = None
     solver: Any = "OSQP"
     inventory_risk_weight: float = 0.0
+    inventory_alpha_model: InventoryAlphaModel | None = None
 
     def __post_init__(self) -> None:
         if self.residual_risk_weight < 0:

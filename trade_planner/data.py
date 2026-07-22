@@ -88,6 +88,30 @@ class PlannerDataProvider:
     def load_event_volatility(self, symbols: Sequence[str], dates: pd.DatetimeIndex) -> pd.Series | Array | None:
         return None
 
+    def load_expected_return(
+        self,
+        symbols: Sequence[str],
+        dates: pd.DatetimeIndex,
+    ) -> pd.DataFrame | pd.Series | Array | None:
+        """Return probability-weighted expected holding returns, if available."""
+        return None
+
+    def load_impact_bps_at_10pct_adv(
+        self,
+        symbols: Sequence[str],
+        dates: pd.DatetimeIndex,
+    ) -> pd.DataFrame | pd.Series | Array | None:
+        """Return date-by-name TCA impact forecasts, if available."""
+        return None
+
+    def load_linear_cost_bps(
+        self,
+        symbols: Sequence[str],
+        dates: pd.DatetimeIndex,
+    ) -> pd.DataFrame | pd.Series | Array | None:
+        """Return date-by-name spread, fee, and commission forecasts."""
+        return None
+
     def load_factor_risk_data(self, symbols: Sequence[str], dates: pd.DatetimeIndex) -> FactorRiskData:
         factor_exposure = self.load_factor_exposure(symbols, dates)
         factor_names = list(factor_exposure.columns.astype(str))
@@ -128,6 +152,39 @@ def build_context_from_provider(
         name="event_days",
     )
     factor_risk_data = provider.load_factor_risk_data(symbols, dates)
+    expected_return_raw = provider.load_expected_return(symbols, dates)
+    expected_return = (
+        align_date_symbol_field(
+            expected_return_raw,
+            dates=dates,
+            symbols=symbols,
+            name="expected_return",
+        ).to_numpy(float)
+        if expected_return_raw is not None
+        else None
+    )
+    impact_bps_raw = provider.load_impact_bps_at_10pct_adv(symbols, dates)
+    impact_bps_at_10pct_adv = (
+        align_date_symbol_field(
+            impact_bps_raw,
+            dates=dates,
+            symbols=symbols,
+            name="impact_bps_at_10pct_adv",
+        ).to_numpy(float)
+        if impact_bps_raw is not None
+        else None
+    )
+    linear_cost_raw = provider.load_linear_cost_bps(symbols, dates)
+    linear_cost_bps = (
+        align_date_symbol_field(
+            linear_cost_raw,
+            dates=dates,
+            symbols=symbols,
+            name="linear_cost_bps",
+        ).to_numpy(float)
+        if linear_cost_raw is not None
+        else None
+    )
 
     event_vol = provider.load_event_volatility(symbols, dates)
     if event_vol is not None:
@@ -139,6 +196,9 @@ def build_context_from_provider(
         market_panel=market_panel,
         event_days=event_days,
         factor_risk_data=factor_risk_data,
+        expected_return=expected_return,
+        impact_bps_at_10pct_adv=impact_bps_at_10pct_adv,
+        linear_cost_bps=linear_cost_bps,
     )
 
 
@@ -203,6 +263,9 @@ def assemble_context(
     event_days: pd.DataFrame,
     factor_risk_data: FactorRiskData,
     metadata: dict[str, object] | None = None,
+    expected_return: Array | None = None,
+    impact_bps_at_10pct_adv: Array | None = None,
+    linear_cost_bps: Array | None = None,
 ) -> PlannerContext:
     """Assemble the normalized PlannerContext from already-loaded fields."""
     orders = normalize_orders(orders)
@@ -246,6 +309,36 @@ def assemble_context(
         factor_exposure=factor_exposure,
         factor_covariance=factor_covariance,
         specific_variance=specific_variance,
+        expected_return=(
+            align_date_symbol_field(
+                expected_return,
+                dates,
+                symbols,
+                "expected_return",
+            ).to_numpy(float)
+            if expected_return is not None
+            else None
+        ),
+        impact_bps_at_10pct_adv=(
+            align_date_symbol_field(
+                impact_bps_at_10pct_adv,
+                dates,
+                symbols,
+                "impact_bps_at_10pct_adv",
+            ).to_numpy(float)
+            if impact_bps_at_10pct_adv is not None
+            else None
+        ),
+        linear_cost_bps=(
+            align_date_symbol_field(
+                linear_cost_bps,
+                dates,
+                symbols,
+                "linear_cost_bps",
+            ).to_numpy(float)
+            if linear_cost_bps is not None
+            else None
+        ),
         metadata=metadata or {},
     )
 

@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import unittest
+
+import cvxpy as cp
+import numpy as np
+import pandas as pd
+
+from trade_planner import (
+    BarraFactorRiskModel,
+    CompositeCostModel,
+    ExpectedReturnAlphaModel,
+    LinearBpsCost,
+    ParticipationCapModel,
+    PlannerContext,
+    QuadraticParticipationImpact,
+    RiskAversion,
+    TradePlanner,
+    TradePlannerConfig,
+    build_context_from_provider,
+    build_rebalance_frontier,
+    default_constraints,
+    infer_execution_cost_matrices,
+    infer_execution_costs,
+)
+from trade_planner.examples import ToyProvider
+
+
+@unittest.skipUnless("CLARABEL" in cp.installed_solvers(), "CLARABEL is not installed")
+class RebalanceCalibrationTests(unittest.TestCase):
+    def test_expected_alpha_moves_profitable_flow_earlier(self) -> None:
+        ctx = _economic_context()
+        common = dict(
+            participation_model=ParticipationCapModel(),
+            risk_model=BarraFactorRiskModel(),
+            cost_model=CompositeCostModel(
+                terms=(QuadraticParticipationImpact(impact_bps_at_10pct_adv=8.0),)
+            ),
+            constraints=default_constraints(),
+            residual_risk_weight=0.0,
+            inventory_risk_weight=0.0,
+            solver="CLARABEL",
+        )
+        without_alpha = TradePlanner(TradePlannerConfig(**common)).solve(ctx).schedule
+        with_alpha = TradePlanner(
+            TradePlannerConfig(
+                **common,
+                inventory_alpha_model=ExpectedReturnAlphaModel(),
+            )
+        ).solve(ctx).schedule
+
+        self.assertLess(_average_execution_day(with_alpha, ctx), _average_execution_day(without_alpha, ctx))
+
+    def test_risk_labels_select_monotone_pnl_budgets_from_one_frontier(self) -> None:
+        ctx = _economic_context()
+        frontier = build_rebalance_frontier(
+            ctx,
+            lambda_multipliers=(0.0, 0.01, 0.1, 1.0, 10.0, 100.0),
+        )
+        high = frontier.select(RiskAversion.HIGH)
+        medium = frontier.select("medium")
+        low = frontier.select(RiskAversion.LOW)
+
+        self.assertLessEqual(high.risk_budget_dollars, medium.risk_budget_dollars)
+        self.assertLessEqual(medium.risk_budget_dollars, low.risk_budget_dollars)
+        self.assertLessEqual(high.metrics.pnl_vol_dollars, high.risk_budget_dollars + 1e-6)
+        self.assertLessEqual(medium.metrics.pnl_vol_dollars, medium.risk_budget_dollars + 1e-6)
+        self.assertLessEqual(low.metrics.pnl_vol_dollars, low.risk_budget_dollars + 1e-6)
+        self.assertGreaterEqual(
+            low.metrics.expected_net_pnl_dollars,
+            high.metrics.expected_net_pnl_dollars - 1e-6,
+        )
+        valid = frontier.frontier[frontier.frontier["status"].str.startswith("optimal")]
+        parent_gross = float(
+            np.sum(
+                np.abs(
+                    ctx.orders["target_shares"].to_numpy(float) * ctx.price[0]
+                )
+            )
+        )
+        self.assertGreaterEqual(
+            low.metrics.expected_net_pnl_dollars,
+            float(valid["expected_net_pnl_dollars"].max()) - parent_gross / 10_000.0 - 1e-6,
+        )
+
+    def test_tca_inputs_set_cost_coefficients_without_user_numbers(self) -> None:
+        ctx = _economic_context()
+        orders = ctx.orders.copy()
+        orders["impact_bps_at_10pct_adv"] = [6.0, 9.0, 15.0, 20.0]
+        orders["linear_cost_bps"] = [0.5, 0.8, 1.2, 2.0]
+        ctx = PlannerContext(**{**ctx.__dict__, "orders": orders})
+
+        impact, linear = infer_execution_costs(ctx)
+
+        self.assertEqual(impact, 9.0)
+        self.assertEqual(linear, 0.8)
+
+    def test_calibration_rejects_missing_alpha_forecast(self) -> None:
+        ctx = _economic_context()
+        ctx = PlannerContext(**{**ctx.__dict__, "expected_return": None})
+        with self.assertRaisesRegex(ValueError, "expected_return"):
+            build_rebalance_frontier(ctx, lambda_multipliers=(0.0, 1.0))
+
+    def test_realistic_dollar_scale_keeps_nonzero_risk_frontier_solvable(self) -> None:
+        ctx = _economic_context()
+        frontier = build_rebalance_frontier(
+            ctx,
+            solver="OSQP",
+            lambda_multipliers=(0.0, 0.1, 1.0, 10.0),
+        )
+
+        self.assertTrue(frontier.frontier["status"].isin(("optimal", "optimal_inaccurate")).all())
+        for result in frontier.results.values():
+            self.assertLessEqual(
+                float(
+                    np.max(
+                        np.abs(result.schedule["trade_shares"].to_numpy(float))
+                        - result.schedule["cap_shares"].to_numpy(float)
+                    )
+                ),
+                0.1,
+            )
+
+    def test_unprofitable_forecast_is_flagged_instead_of_claimed_profitable(self) -> None:
+        ctx = _economic_context()
+        ctx = PlannerContext(
+            **{**ctx.__dict__, "expected_return": np.zeros_like(ctx.expected_return)}
+        )
+
+        plan = build_rebalance_frontier(
+            ctx,
+            lambda_multipliers=(0.0, 0.1, 1.0, 10.0),
+        ).select("medium")
+
+        self.assertFalse(plan.economically_viable)
+        self.assertLess(plan.metrics.expected_net_pnl_dollars, 0.0)
+
+    def test_provider_economic_inputs_are_aligned_into_context(self) -> None:
+        class AlphaProvider(ToyProvider):
+            def load_expected_return(self, symbols, dates):
+                return pd.DataFrame(
+                    {
+                        symbol: np.full(len(dates), (index + 1) / 10_000.0)
+                        for index, symbol in enumerate(symbols)
+                    },
+                    index=dates,
+                )
+
+            def load_impact_bps_at_10pct_adv(self, symbols, dates):
+                return pd.DataFrame(
+                    {
+                        symbol: np.full(len(dates), 7.0 + index)
+                        for index, symbol in enumerate(symbols)
+                    },
+                    index=dates,
+                )
+
+            def load_linear_cost_bps(self, symbols, dates):
+                return pd.DataFrame(
+                    {
+                        symbol: np.full(len(dates), 0.5 + index / 10.0)
+                        for index, symbol in enumerate(symbols)
+                    },
+                    index=dates,
+                )
+
+        orders = pd.DataFrame(
+            {"target_shares": [1_000.0, -800.0]},
+            index=["BBB", "AAA"],
+        )
+        ctx = build_context_from_provider(
+            orders,
+            "2026-07-01",
+            "2026-07-03",
+            AlphaProvider(),
+        )
+
+        self.assertEqual(ctx.expected_return.shape, (3, 2))
+        np.testing.assert_allclose(ctx.expected_return[0], [0.0001, 0.0002])
+        impact, linear = infer_execution_cost_matrices(ctx)
+        self.assertEqual(impact.shape, (3, 2))
+        self.assertEqual(linear.shape, (3, 2))
+        np.testing.assert_allclose(impact[0], [7.0, 8.0])
+        np.testing.assert_allclose(linear[0], [0.5, 0.6])
+
+
+def _economic_context() -> PlannerContext:
+    dates = pd.bdate_range("2026-07-01", periods=6)
+    symbols = ["URGENT_BUY", "URGENT_SELL", "SMALL_BUY", "SMALL_SELL"]
+    targets = np.array([55_000.0, -55_000.0, 10_000.0, -10_000.0])
+    prices = np.array([80.0, 82.0, 45.0, 47.0])
+    shape = (len(dates), len(symbols))
+    exposure = np.array(
+        [
+            [1.0, 1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    expected_return = np.tile(
+        np.array([0.0008, -0.0008, 0.0005, -0.0005])[None, :],
+        (len(dates), 1),
+    )
+    expected_return[-1] = 0.0
+    return PlannerContext(
+        symbols=symbols,
+        dates=dates,
+        orders=pd.DataFrame({"target_shares": targets}, index=symbols),
+        panel=pd.DataFrame(index=pd.MultiIndex.from_product([dates, symbols])),
+        price=np.tile(prices[None, :], (len(dates), 1)),
+        adv_shares=np.full(shape, 100_000.0),
+        is_open=np.ones(shape, dtype=bool),
+        base_participation=np.full(shape, 0.10),
+        event_days=pd.DataFrame(np.inf, index=dates, columns=symbols),
+        factor_names=["country", "sector", "industry", "offset"],
+        factor_exposure=np.tile(exposure[None, :, :], (len(dates), 1, 1)),
+        factor_covariance=np.tile(
+            (np.eye(exposure.shape[1]) * 0.0001)[None, :, :],
+            (len(dates), 1, 1),
+        ),
+        specific_variance=np.full(shape, 0.000025),
+        expected_return=expected_return,
+    )
+
+
+def _average_execution_day(schedule: pd.DataFrame, ctx: PlannerContext) -> float:
+    trades = (
+        schedule.pivot(index="date", columns="symbol", values="trade_shares")
+        .reindex(index=ctx.dates, columns=ctx.symbols)
+        .to_numpy(float)
+    )
+    daily = np.sum(np.abs(trades) * ctx.price, axis=1)
+    days = np.arange(1, len(daily) + 1, dtype=float)
+    return float(np.dot(days, daily) / np.sum(daily))
+
+
+if __name__ == "__main__":
+    unittest.main()

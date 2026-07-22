@@ -189,6 +189,60 @@ env PYTHONPATH=. python experiments/daily_volume_behavior.py \
 See [Optimizer-derived daily volume behavior](docs/daily_volume_behavior.md)
 for the benchmark, acceptance gates, selected combination, and artifact map.
 
+## Investment-Driven Rebalance Calibration
+
+The fixed synthetic weights above are useful for testing shape, but production
+coefficients should be in economic units. When the provider supplies a
+probability-weighted daily rebalance return forecast, the planner can solve one
+expected-net-P&L versus accumulated-P&L-risk frontier and let the user choose
+only `high`, `medium`, or `low` risk aversion:
+
+```python
+from trade_planner import calibrate_rebalance_plan
+
+plan = calibrate_rebalance_plan(ctx, risk_aversion="medium")
+schedule = plan.result.schedule
+
+print(plan.metrics)
+print(plan.frontier)
+print(plan.economically_viable)
+```
+
+The calibrated objective is:
+
+```text
+expected market impact + spread/fees
+    - expected holding alpha
+    + selected risk coefficient * accumulated holding-P&L variance
+```
+
+There is deliberately no separate alpha coefficient: forecast confidence is
+already reflected in probability-weighted `expected_return`. Impact and linear
+costs use the date-by-name `impact_bps_at_10pct_adv` and `linear_cost_bps` TCA
+surfaces directly, with a volatility-based impact fallback. The inventory-risk
+coefficient is selected from solved schedules rather than copied from the
+unit-scaled behavior fixture.
+
+`high` stays near the minimum feasible P&L risk, `medium` allows half of the
+feasible risk range when expected alpha pays for it, and `low` allows the full
+range. Within each budget, expected-P&L differences smaller than one basis
+point of parent gross are treated as economically tied and the lower-risk plan
+wins. Capacity and completion remain hard constraints for every profile.
+`economically_viable` is false when forecast alpha does not cover modeled
+impact and fees; the planner never labels a compulsory but negative-edge
+execution as profitable.
+
+Run the recorded economic experiment with:
+
+```bash
+env PYTHONPATH=. python experiments/rebalance_economic_calibration.py
+```
+
+See [Investment-driven rebalance calibration](docs/rebalance_economic_calibration.md)
+for the tested hypotheses, Monte Carlo validation, limitations, and artifact
+map. The economic experiment complements rather than replaces the fixed shape
+gates in `daily_volume_behavior.py`.
+
 ## CVXPY Model Diagnostics
 
 For a worked three-name example with a real CLARABEL failure and a transparent
@@ -317,6 +371,7 @@ The provider implements:
 - `load_factor_covariance(factor_names, dates)`
 - `load_specific_variance(symbols, dates)`
 - optional `load_event_volatility(symbols, dates)`: returns event jump volatility used by the earnings risk overlay
+- optional `load_expected_return(symbols, dates)`: probability-weighted expected return earned by accumulated inventory after each planner date
 
 Minimal provider skeleton:
 

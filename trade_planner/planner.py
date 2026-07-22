@@ -116,12 +116,13 @@ class TradePlanner:
         ) * target[None, :]
         trades.value = reference
         reference_value = total_objective.value
-        if reference_value is None or not np.isfinite(reference_value) or reference_value <= 0:
+        if reference_value is None or not np.isfinite(reference_value) or reference_value == 0:
             return 1.0
         # Keep typical objective magnitudes in a range that works well across
-        # open-source QP and conic backends. This is a positive scalar only;
-        # risk/cost trade-offs and the optimizer's solution are unchanged.
-        return 1_000_000.0 / max(float(reference_value), 1_000_000.0)
+        # open-source QP and conic backends. Alpha rewards can make the
+        # reference objective negative, so scale by magnitude. This remains a
+        # positive scalar only; model trade-offs and the optimum are unchanged.
+        return 1_000_000.0 / max(abs(float(reference_value)), 1_000_000.0)
 
     @staticmethod
     def _build_state(
@@ -168,14 +169,31 @@ class TradePlanner:
                     self.config.residual_risk_weight
                     * self.config.risk_model.objective(residual, ctx, date_index)
                 )
+            if self.config.inventory_alpha_model is not None:
+                objective_terms.append(
+                    self.config.inventory_alpha_model.objective(cumulative, ctx, date_index)
+                )
             objective_terms.append(self.config.cost_model.objective(trade_t, ctx, date_index))
         return objective_terms
 
     def _solve_problem(self, problem: cp.Problem) -> None:
+        requested_solver = diagnostic_mosek_if_requested(self.config.solver)
+        solver_options: dict[str, object] = {}
+        if str(self.config.solver).upper() == "OSQP":
+            # Production-sized share variables need tighter feasibility
+            # tolerances than OSQP's defaults for participation caps to remain
+            # operationally hard after numerical scaling.
+            solver_options = {
+                "eps_abs": 1e-8,
+                "eps_rel": 1e-8,
+                "max_iter": 500_000,
+                "polishing": True,
+            }
         try:
             problem.solve(
-                solver=diagnostic_mosek_if_requested(self.config.solver),
+                solver=requested_solver,
                 warm_start=True,
+                **solver_options,
             )
         except cp.SolverError:
             problem.solve(solver="CLARABEL", warm_start=True)
