@@ -22,7 +22,7 @@ therefore a research challenger, not a production default.
 |---:|---|---|---|---|
 | 1 | Real point-in-time rebalance replay | Critical / highest | Synthetic holdouts disagree on P&L even when every risk and behavior metric improves. Money-making claims cannot be proven from generated returns. The leakage-controlled loader and baseline-versus-challenger runner are implemented. | Export the first frozen real development bundle with stored prediction vintages, orders, close/VWAP, realized ADV, spread/impact, FX, financing, borrow, and GICS/country classifications. Run it without changing the predeclared gates; open a sealed holdout only if development passes. |
 | 2 | Conditional alpha-decay and timing model | Very high | Holdout P&L losses come from foregone gross holding alpha, especially a few large event misses; forecast-plan P&L has weak event-level correlation with realized P&L. | Estimate expected return paths and uncertainty by rebalance type, add/delete side, days to event, country, sector, industry, liquidity, crowding, and prediction confidence with hierarchical shrinkage. Feed both mean and uncertainty point-in-time to the optimizer. |
-| 3 | Numerically scaled execution formulation | High / deployment-critical | OSQP occasionally misses caps by less than 0.2 share; CLARABEL falsely reports the forecast-liquidity frontier infeasible; added profit floors were numerically unreliable. | Normalize decision variables and constraints by per-name order/cap scale, retain objectives in economic units, then require post-solve residual certificates below desk tolerances on every solver. |
+| 3 | Numerically scaled execution formulation | Implemented / deployment-critical | The exact quadratic P&L floor now solves on spent events 25–26 under explicit CLARABEL. Both floors clear and cap, direction, completion, and urgency certificates pass. The investment candidate still fails volatility, small-order, and factor gates, so only the numerical formulation is kept. | Use per-name scaling and strict raw-share certificates in the real historical replay. Extend backend-specific certification only when another production solver is actually required; do not use the mechanics pass as profit evidence. |
 | 4 | Risk-scaled minimax liquidity challenger | High for swing, unproven for profit | Fresh validation cut volatility 5.49 bp and loss-CVaR 16.08 bp; untouched holdout cut volatility 8.08 bp and loss-CVaR 14.75 bp, but lost 3.24 bp/event. | Preserve as a challenger for real-data replay. Do not promote or tune against spent synthetic holdouts. |
 | 5 | Automatic High/Medium/Low calibration from real economics | High after real data exists | Fixed mappings create interpretable behavior, but synthetic holdouts show that coefficient stability is not enough when timing alpha is noisy. | Select mappings by nested chronological validation on realized utility: net P&L first, then volatility/CVaR/drawdown and operational gates. Store calibration date, sample, and uncertainty with every plan. |
 | 6 | More synthetic penalty or threshold tuning | Low | Confidence haircuts, uncertainty budgets, recourse, proximal terms, profit floors, plan-selection gates, and baseline-relative regret risk all failed or were numerically unstable. | Defer until real-data error analysis identifies a specific missing risk or constraint. Avoid blind sweeps. |
@@ -49,7 +49,7 @@ chooses the complete schedule.
 
 ## Evidence map
 
-- `artifacts/walkforward_research_ledger.csv`: compact index of all 45 recorded
+- `artifacts/walkforward_research_ledger.csv`: compact index of all 46 recorded
   screens, development runs, holdouts, crashes, and decisions.
 - `artifacts/liquidity_minimax_factor_dev*` and
   `artifacts/liquidity_minimax_factor_holdout*`: full-shape minimax evidence.
@@ -62,6 +62,9 @@ chooses the complete schedule.
 - `docs/historical_replay_bundle.md` and `experiments/historical_replay.py`:
   strict real-data schema, no-leakage validation, explicit cohort authorization,
   source hashing, and the frozen baseline-versus-challenger evaluator.
+- `docs/numerical_scaling.md` and `artifacts/numerical_scaling_mechanics*`:
+  predeclaration, algebraic invariance evidence, strict raw-share certificates,
+  fixed spent-event mechanics result, and six-panel visualization.
 
 ## Production decision rule
 

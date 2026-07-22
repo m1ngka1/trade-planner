@@ -253,6 +253,8 @@ def calibrate_rebalance_plan(
     risk_measure: RebalanceRiskMeasure | str = RebalanceRiskMeasure.AUTO,
     cvar_confidence: float = 0.95,
     max_optimization_scenarios: int | None = DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
+    numerical_scaling: str = "none",
+    verify_hard_constraints: bool = False,
 ) -> CalibratedRebalancePlan:
     """Solve a data-scaled frontier and select the best plan inside a risk budget."""
 
@@ -279,6 +281,8 @@ def calibrate_rebalance_plan(
         risk_measure=parsed_measure,
         cvar_confidence=cvar_confidence,
         max_optimization_scenarios=max_optimization_scenarios,
+        numerical_scaling=numerical_scaling,
+        verify_hard_constraints=verify_hard_constraints,
     ).select(parsed_aversion)
 
 
@@ -292,6 +296,8 @@ def build_rebalance_frontier(
     cvar_confidence: float = 0.95,
     max_optimization_scenarios: int | None = DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
     inventory_alpha_model: InventoryAlphaModel | None = None,
+    numerical_scaling: str = "none",
+    verify_hard_constraints: bool = False,
 ) -> RebalanceFrontier:
     """Solve the expected-net-P&L versus accumulated-P&L-risk frontier."""
 
@@ -448,6 +454,8 @@ def build_rebalance_frontier(
             ),
             terminal_penalty=None,
             solver=solver,
+            numerical_scaling=numerical_scaling,
+            verify_hard_constraints=verify_hard_constraints,
         )
         configs[candidate] = config
         try:

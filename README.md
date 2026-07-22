@@ -390,6 +390,15 @@ schema and command. Its included synthetic smoke bundle validates plumbing
 only; profitability still requires a real development cohort followed by one
 untouched historical holdout.
 
+The deployment path also supports per-name numerical scaling: objectives keep
+their exact dollar economics in parent-order units, built-in hard constraints
+are dimensionless, and every result receives an independent raw-share cap,
+direction, and completion certificate. The fixed spent-event screen repaired
+the previously false-infeasible quadratic P&L floor without weakening any
+limit, while still rejecting that investment policy on volatility, small-order,
+and factor-balance gates. See
+[Numerically scaled execution formulation](docs/numerical_scaling.md).
+
 See [Point-in-time rebalance replay](docs/point_in_time_walkforward.md) for the
 data contract, every trial, keep/discard logic, and visual artifacts.
 See [Research priorities](docs/research_priorities.md) for the ranked next work,

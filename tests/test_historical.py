@@ -108,7 +108,7 @@ def test_historical_runner_produces_auditable_baseline_comparison(
     outputs, metadata = run_historical_experiment(
         bundle,
         risk_aversion="medium",
-        solver="OSQP",
+        solver="CLARABEL",
     )
 
     assert set(outputs) == {

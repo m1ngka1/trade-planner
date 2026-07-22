@@ -50,7 +50,12 @@ class QuadraticParticipationImpact:
     def objective(self, trade: cp.Expression, ctx: PlannerContext, date_index: int) -> cp.Expression:
         price = ctx.price[date_index]
         adv = safe_numeric(ctx.adv_shares[date_index])
-        eta = (self.impact_bps_at_10pct_adv / 10000.0) * price / safe_numeric(0.10 * adv)
+        eta = _impact_coefficient_in_context_units(
+            self.impact_bps_at_10pct_adv,
+            price,
+            adv,
+            ctx,
+        )
         return cp.sum(cp.multiply(eta, cp.square(trade)))
 
 
@@ -80,7 +85,12 @@ class TCAQuadraticParticipationImpact:
         )
         price = ctx.price[date_index]
         adv = safe_numeric(ctx.adv_shares[date_index])
-        eta = (forecasts / 10_000.0) * price / safe_numeric(0.10 * adv)
+        eta = _impact_coefficient_in_context_units(
+            forecasts,
+            price,
+            adv,
+            ctx,
+        )
         return cp.sum(cp.multiply(eta, cp.square(trade)))
 
 
@@ -115,6 +125,36 @@ def _cost_forecast_row(
     if not np.all(np.isfinite(row)) or np.any(row < 0):
         raise ValueError(f"{name} must contain finite non-negative values")
     return row
+
+
+def _impact_coefficient_in_context_units(
+    impact_bps_at_10pct_adv: float | np.ndarray,
+    price: np.ndarray,
+    adv: np.ndarray,
+    ctx: PlannerContext,
+) -> np.ndarray:
+    """Return exact impact coefficients for shares or scaled parent units."""
+
+    raw_scale = ctx.metadata.get("numerical_share_scale")
+    if raw_scale is None:
+        return (
+            np.asarray(impact_bps_at_10pct_adv, dtype=float)
+            / 10_000.0
+            * price
+            / safe_numeric(0.10 * adv)
+        )
+    share_scale = np.asarray(raw_scale, dtype=float)
+    if share_scale.shape != (len(ctx.symbols),) or np.any(share_scale <= 0.0):
+        raise ValueError("numerical_share_scale must be one positive value per symbol")
+    original_price = np.asarray(price, dtype=float) / share_scale
+    original_adv = np.asarray(adv, dtype=float) * share_scale
+    share_coefficient = (
+        np.asarray(impact_bps_at_10pct_adv, dtype=float)
+        / 10_000.0
+        * original_price
+        / safe_numeric(0.10 * original_adv)
+    )
+    return share_coefficient * np.square(share_scale)
 
 
 @dataclass(frozen=True)

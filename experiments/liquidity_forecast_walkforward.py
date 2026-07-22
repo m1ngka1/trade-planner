@@ -438,38 +438,66 @@ class ExpectedNetPnlFloorConstraint:
             raise ValueError(
                 "ExpectedNetPnlFloorConstraint requires expected_return"
             )
-        expected_alpha: cp.Expression | float = 0.0
-        impact_cost: cp.Expression | float = 0.0
-        linear_cost: cp.Expression | float = 0.0
-        for date_index, cumulative in enumerate(state.cumulative_trades):
-            price = np.asarray(ctx.price[date_index], dtype=float)
-            position_dollars = cp.multiply(price, cumulative)
-            expected_alpha = expected_alpha + cp.sum(
-                cp.multiply(ctx.expected_return[date_index], position_dollars)
+        if self.normalization_dollars <= 0.0:
+            raise ValueError("profit-floor normalization must be positive")
+        expected_alpha_normalized: cp.Expression | float = 0.0
+        impact_cost_normalized: cp.Expression | float = 0.0
+        linear_cost_normalized: cp.Expression | float = 0.0
+        share_scale = np.asarray(
+            getattr(state, "share_scale", np.ones(len(ctx.symbols))),
+            dtype=float,
+        )
+        cumulative_path = getattr(
+            state,
+            "constraint_cumulative_trades",
+            state.cumulative_trades,
+        )
+        trade_path = getattr(state, "constraint_trades", state.trades)
+        for date_index, cumulative in enumerate(cumulative_path):
+            price_units = (
+                np.asarray(ctx.price[date_index], dtype=float) * share_scale
             )
-            trade = state.trades[date_index, :]
-            adv = np.maximum(
-                np.asarray(ctx.adv_shares[date_index], dtype=float),
+            position_dollars = cp.multiply(price_units, cumulative)
+            expected_alpha_normalized = expected_alpha_normalized + cp.sum(
+                cp.multiply(
+                    ctx.expected_return[date_index]
+                    / self.normalization_dollars,
+                    position_dollars,
+                )
+            )
+            trade = trade_path[date_index, :]
+            adv_units = np.maximum(
+                np.asarray(ctx.adv_shares[date_index], dtype=float)
+                / share_scale,
                 1e-12,
             )
             eta = (
                 self.impact_bps_at_10pct_adv[date_index]
                 / 10_000.0
-                * price
-                / (0.10 * adv)
+                * price_units
+                / (0.10 * adv_units)
             )
-            impact_cost = impact_cost + cp.sum(cp.multiply(eta, cp.square(trade)))
-            linear_cost = linear_cost + cp.sum(
+            impact_cost_normalized = impact_cost_normalized + cp.sum(
                 cp.multiply(
-                    self.linear_cost_bps[date_index] / 10_000.0 * price,
-                    cp.abs(trade),
+                    eta / self.normalization_dollars,
+                    cp.square(trade),
                 )
             )
-        forecast_net_pnl = expected_alpha - impact_cost - linear_cost
-        if self.normalization_dollars <= 0.0:
-            raise ValueError("profit-floor normalization must be positive")
+            linear_cost_normalized = linear_cost_normalized + cp.sum(
+                cp.multiply(
+                    self.linear_cost_bps[date_index]
+                    / 10_000.0
+                    * price_units,
+                    cp.abs(trade) / self.normalization_dollars,
+                )
+            )
+        forecast_net_pnl_normalized = (
+            expected_alpha_normalized
+            - impact_cost_normalized
+            - linear_cost_normalized
+        )
         return [
-            forecast_net_pnl / self.normalization_dollars
+            forecast_net_pnl_normalized
             >= self.floor_dollars / self.normalization_dollars
         ]
 
@@ -488,14 +516,30 @@ class ExpectedHoldingAlphaFloorConstraint:
             )
         if self.normalization_dollars <= 0.0:
             raise ValueError("holding-alpha-floor normalization must be positive")
-        expected_alpha: cp.Expression | float = 0.0
-        for date_index, cumulative in enumerate(state.cumulative_trades):
-            position_dollars = cp.multiply(ctx.price[date_index], cumulative)
-            expected_alpha = expected_alpha + cp.sum(
-                cp.multiply(ctx.expected_return[date_index], position_dollars)
+        expected_alpha_normalized: cp.Expression | float = 0.0
+        share_scale = np.asarray(
+            getattr(state, "share_scale", np.ones(len(ctx.symbols))),
+            dtype=float,
+        )
+        cumulative_path = getattr(
+            state,
+            "constraint_cumulative_trades",
+            state.cumulative_trades,
+        )
+        for date_index, cumulative in enumerate(cumulative_path):
+            price_units = (
+                np.asarray(ctx.price[date_index], dtype=float) * share_scale
+            )
+            position_dollars = cp.multiply(price_units, cumulative)
+            expected_alpha_normalized = expected_alpha_normalized + cp.sum(
+                cp.multiply(
+                    ctx.expected_return[date_index]
+                    / self.normalization_dollars,
+                    position_dollars,
+                )
             )
         return [
-            expected_alpha / self.normalization_dollars
+            expected_alpha_normalized
             >= self.floor_dollars / self.normalization_dollars
         ]
 
@@ -513,6 +557,8 @@ def run_experiment(
     plan_selection_policy: str = "always_candidate",
     liquidity_shape_policy: str = "full",
     regret_policy: str = "none",
+    numerical_scaling: str = "none",
+    verify_hard_constraints: bool = False,
     event_seeds: tuple[int, ...] = LIQUIDITY_EVENT_SEEDS,
     scenario_seeds: tuple[int, ...] = LIQUIDITY_SCENARIO_SEEDS,
     realized_liquidity_seeds: tuple[int, ...] = REALIZED_LIQUIDITY_SEEDS,
@@ -535,6 +581,8 @@ def run_experiment(
         raise ValueError("event, scenario, and liquidity seed cohorts must align")
     if not 0 < development_event_count < len(event_seeds):
         raise ValueError("development_event_count must split the seed cohort")
+    if numerical_scaling not in {"none", "per_name"}:
+        raise ValueError("numerical_scaling must be 'none' or 'per_name'")
     parsed_aversion = RiskAversion.parse(risk_aversion)
     resolved_quantile = (
         LIQUIDITY_QUANTILES[parsed_aversion]
@@ -709,6 +757,8 @@ def run_experiment(
                 lambda_multipliers=LAMBDA_MULTIPLIERS,
                 risk_measure=RebalanceRiskMeasure.VARIANCE,
                 inventory_alpha_model=inventory_alpha_model,
+                numerical_scaling=numerical_scaling,
+                verify_hard_constraints=verify_hard_constraints,
             )
             frontier_plan = frontier.select(parsed_aversion)
             applied_config = frontier_plan.config
@@ -1265,6 +1315,8 @@ def run_experiment(
         "plan_selection_policy": plan_selection_policy,
         "liquidity_shape_policy": liquidity_shape_policy,
         "regret_policy": regret_policy,
+        "numerical_scaling": numerical_scaling,
+        "verify_hard_constraints": verify_hard_constraints,
         "regret_fraction": (
             regret_weight_for_risk_profile(parsed_aversion)
             if regret_policy != "none"

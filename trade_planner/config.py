@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from .alpha import InventoryAlphaModel
@@ -26,6 +27,11 @@ class TradePlannerConfig:
     inventory_alpha_model: InventoryAlphaModel | None = None
     inventory_path_risk_weight: float = 0.0
     inventory_path_risk_model: InventoryPathRiskModel | None = None
+    numerical_scaling: str = "none"
+    verify_hard_constraints: bool = False
+    cap_tolerance_shares: float = 0.05
+    direction_tolerance_shares: float = 0.001
+    completion_tolerance_shares: float = 0.001
 
     def __post_init__(self) -> None:
         if self.residual_risk_weight < 0:
@@ -38,6 +44,19 @@ class TradePlannerConfig:
             raise ValueError(
                 "inventory_path_risk_model is required when inventory_path_risk_weight is positive"
             )
+        if self.numerical_scaling not in {"none", "per_name"}:
+            raise ValueError("numerical_scaling must be 'none' or 'per_name'")
+        for name, value in (
+            ("cap_tolerance_shares", self.cap_tolerance_shares),
+            ("direction_tolerance_shares", self.direction_tolerance_shares),
+            ("completion_tolerance_shares", self.completion_tolerance_shares),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or not isfinite(float(value))
+                or float(value) < 0.0
+            ):
+                raise ValueError(f"{name} must be a non-negative number")
 
 
 def default_earnings_aware_config() -> TradePlannerConfig:

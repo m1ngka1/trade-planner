@@ -73,9 +73,13 @@ env PYTHONPATH=. python experiments/historical_replay.py \
   --bundle /path/to/frozen/development_bundle \
   --role development \
   --risk-aversion medium \
-  --solver OSQP \
+  --solver CLARABEL \
   --output-prefix artifacts/historical_replay_development
 ```
+
+The historical runner enables per-name numerical scaling and strict raw-share
+certificates. CLARABEL is the explicit default because the frozen minimax
+factor policy is conic; this avoids an implicit OSQP-to-CLARABEL fallback.
 
 The prefix produces event trials, paired deltas, aggregate summaries, all 16
 predeclared gates, schedules, daily realized economics, volume profiles,

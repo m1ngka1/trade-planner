@@ -19,12 +19,53 @@ from .types import Array
 class OptimizationState:
     """Variables and reusable expressions exposed to constraint plugins."""
 
-    trades: cp.Variable
+    trades: cp.Expression
     target: Array
     caps: Array
     cumulative_trades: tuple[cp.Expression, ...]
     residuals: tuple[cp.Expression, ...]
     terminal_residual: cp.Expression
+    trade_units: cp.Expression | None = None
+    target_units: Array | None = None
+    caps_units: Array | None = None
+    cumulative_trade_units: tuple[cp.Expression, ...] | None = None
+    residual_units: tuple[cp.Expression, ...] | None = None
+    terminal_residual_units: cp.Expression | None = None
+    share_scale: Array | None = None
+
+    @property
+    def constraint_trades(self) -> cp.Expression:
+        """Decision expression used by dimensionless execution constraints."""
+
+        return self.trades if self.trade_units is None else self.trade_units
+
+    @property
+    def constraint_target(self) -> Array:
+        return self.target if self.target_units is None else self.target_units
+
+    @property
+    def constraint_caps(self) -> Array:
+        return self.caps if self.caps_units is None else self.caps_units
+
+    @property
+    def constraint_cumulative_trades(self) -> tuple[cp.Expression, ...]:
+        return (
+            self.cumulative_trades
+            if self.cumulative_trade_units is None
+            else self.cumulative_trade_units
+        )
+
+    @property
+    def constraint_residuals(self) -> tuple[cp.Expression, ...]:
+        return self.residuals if self.residual_units is None else self.residual_units
+
+    @property
+    def constraint_terminal_residual(self) -> cp.Expression:
+        return (
+            self.terminal_residual
+            if self.terminal_residual_units is None
+            else self.terminal_residual_units
+        )
 
 
 @dataclass(frozen=True)
@@ -157,7 +198,7 @@ class ParticipationCapacityConstraint:
 
         return [
             with_diagnostics(
-                cp.abs(state.trades) <= state.caps,
+                cp.abs(state.constraint_trades) <= state.constraint_caps,
                 ConstraintDiagnostics(
                     name="participation_capacity",
                     group="capacity",
@@ -185,7 +226,11 @@ class DirectionConstraint:
         direction = np.sign(state.target)
         return [
             with_diagnostics(
-                cp.multiply(np.tile(direction, (len(ctx.dates), 1)), state.trades) >= 0,
+                cp.multiply(
+                    np.tile(direction, (len(ctx.dates), 1)),
+                    state.constraint_trades,
+                )
+                >= 0,
                 ConstraintDiagnostics(
                     name="order_direction",
                     group="direction",
@@ -215,7 +260,7 @@ class ZeroTargetConstraint:
         zero_symbols = tuple(ctx.symbols[i] for i in zero_target_idx)
         return [
             with_diagnostics(
-                state.trades[:, zero_target_idx] == 0,
+                state.constraint_trades[:, zero_target_idx] == 0,
                 ConstraintDiagnostics(
                     name="zero_target_no_trade",
                     group="mandate",
@@ -296,7 +341,8 @@ class HardCompletionConstraint:
 
         return [
             with_diagnostics(
-                cp.sum(state.trades, axis=0) == state.target,
+                cp.sum(state.constraint_trades, axis=0)
+                == state.constraint_target,
                 ConstraintDiagnostics(
                     name="hard_completion",
                     group="completion",
@@ -328,11 +374,17 @@ class DailyGrossNotionalLimit:
         limits = _align_daily_limit(self.max_dollars, ctx.dates)
         out = []
         for date_index, limit in enumerate(limits):
-            trade_dollars = cp.multiply(ctx.price[date_index], state.trades[date_index, :])
+            price_units = ctx.price[date_index] * _state_share_scale(state)
+            trade_dollars = cp.multiply(
+                price_units,
+                state.constraint_trades[date_index, :],
+            )
+            normalization = max(abs(float(limit)), 1.0)
             date_label = str(ctx.dates[date_index].date())
             out.append(
                 with_diagnostics(
-                    cp.sum(cp.abs(trade_dollars)) <= limit,
+                    cp.sum(cp.abs(trade_dollars)) / normalization
+                    <= limit / normalization,
                     ConstraintDiagnostics(
                         name=f"daily_gross_notional_limit[{date_label}]",
                         group="notional",
@@ -360,12 +412,19 @@ class DailyNetNotionalLimit:
         limits = _align_daily_limit(self.max_abs_dollars, ctx.dates)
         out = []
         for date_index, limit in enumerate(limits):
-            net_dollars = cp.sum(cp.multiply(ctx.price[date_index], state.trades[date_index, :]))
+            price_units = ctx.price[date_index] * _state_share_scale(state)
+            net_dollars = cp.sum(
+                cp.multiply(
+                    price_units,
+                    state.constraint_trades[date_index, :],
+                )
+            )
+            normalization = max(abs(float(limit)), 1.0)
             date_label = str(ctx.dates[date_index].date())
             out.extend(
                 [
                     with_diagnostics(
-                        net_dollars <= limit,
+                        net_dollars / normalization <= limit / normalization,
                         ConstraintDiagnostics(
                             name=f"daily_net_notional_upper[{date_label}]",
                             group="notional",
@@ -380,7 +439,7 @@ class DailyNetNotionalLimit:
                         ),
                     ),
                     with_diagnostics(
-                        net_dollars >= -limit,
+                        net_dollars / normalization >= -limit / normalization,
                         ConstraintDiagnostics(
                             name=f"daily_net_notional_lower[{date_label}]",
                             group="notional",
@@ -417,11 +476,13 @@ class MinCompletionByDate:
             raise ValueError("milestone date is before the planner start date")
         idx = min(idx, len(ctx.dates) - 1)
         direction = np.sign(state.target)
-        completed = state.cumulative_trades[idx]
+        completed = state.constraint_cumulative_trades[idx]
+        target = state.constraint_target
         date_label = str(ctx.dates[idx].date())
         return [
             with_diagnostics(
-                cp.multiply(direction, completed) >= self.fraction * np.abs(state.target),
+                cp.multiply(direction, completed)
+                >= self.fraction * np.abs(target),
                 ConstraintDiagnostics(
                     name=f"min_completion_by_date[{date_label}]",
                     group="completion",
@@ -449,17 +510,24 @@ class FactorExposureLimit:
     def constraints(self, ctx: PlannerContext, state: OptimizationState) -> list[cp.Constraint]:
         matrix = self.exposures.reindex(ctx.symbols).fillna(0.0).to_numpy(float)
         out = []
-        expressions = state.residuals if self.use_residual else state.cumulative_trades
+        expressions = (
+            state.constraint_residuals
+            if self.use_residual
+            else state.constraint_cumulative_trades
+        )
         factor_labels = tuple(str(col) for col in self.exposures.columns)
         exposure_basis = "residual" if self.use_residual else "cumulative"
         for date_index, expr in enumerate(expressions):
-            dollars = cp.multiply(ctx.price[date_index], expr)
+            price_units = ctx.price[date_index] * _state_share_scale(state)
+            dollars = cp.multiply(price_units, expr)
             factor_exposure = matrix.T @ dollars
+            normalization = max(abs(float(self.max_abs_exposure)), 1.0)
             date_label = str(ctx.dates[date_index].date())
             out.extend(
                 [
                     with_diagnostics(
-                        factor_exposure <= self.max_abs_exposure,
+                        factor_exposure / normalization
+                        <= self.max_abs_exposure / normalization,
                         ConstraintDiagnostics(
                             name=f"{exposure_basis}_factor_exposure_upper[{date_label}]",
                             group="factor_exposure",
@@ -478,7 +546,8 @@ class FactorExposureLimit:
                         ),
                     ),
                     with_diagnostics(
-                        factor_exposure >= -self.max_abs_exposure,
+                        factor_exposure / normalization
+                        >= -self.max_abs_exposure / normalization,
                         ConstraintDiagnostics(
                             name=f"{exposure_basis}_factor_exposure_lower[{date_label}]",
                             group="factor_exposure",
@@ -531,3 +600,9 @@ def _align_daily_limit(
 
 def _date_labels(dates: pd.DatetimeIndex) -> tuple[str, ...]:
     return tuple(str(date.date()) for date in dates)
+
+
+def _state_share_scale(state: OptimizationState) -> Array:
+    if state.share_scale is None:
+        return np.ones_like(state.target, dtype=float)
+    return np.asarray(state.share_scale, dtype=float)

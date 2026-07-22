@@ -578,6 +578,25 @@ to justify a coefficient sweep or new data.  Events 121-144 remain unallocated.
 
 Artifacts: `artifacts/baseline_tracking_risk_spent*`.
 
+## Numerical-scaling follow-up
+
+The earlier net-P&L floor failure was revisited strictly as numerical plumbing,
+not as a new investment trial. The exact floor is a convex quadratic
+constraint, so the prior command that requested OSQP had silently fallen back
+to CLARABEL. The corrected screen explicitly uses CLARABEL, per-name parent
+units, economically equivalent transformed price/ADV inputs, dimensionless
+hard constraints, and an independent raw-share certificate.
+
+On spent events 25–26, both exact P&L floors solved and cleared, urgent names
+were not delayed, maximum cap excess was `0.000011` share, wrong-direction flow
+was zero, and terminal error was below `0.000000003` share. This keeps the
+numerical formulation. It does not revive the policy: volatility increased
+`6.658 bp`, one small order moved a day earlier, and early factor imbalance
+increased `1.523` percentage points. No fresh or sealed cohort was opened.
+
+See `docs/numerical_scaling.md` and
+`artifacts/numerical_scaling_mechanics*`.
+
 ## Reproduce
 
 ```bash

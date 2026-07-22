@@ -44,7 +44,7 @@ def run_historical_experiment(
     bundle: HistoricalReplayBundle,
     *,
     risk_aversion: str = "medium",
-    solver: str = "OSQP",
+    solver: str = "CLARABEL",
 ) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
     """Compare the flat-ADV baseline with the frozen minimax challenger."""
 
@@ -67,6 +67,8 @@ def run_historical_experiment(
             solver=solver,
             lambda_multipliers=LAMBDA_MULTIPLIERS,
             risk_measure=RebalanceRiskMeasure.VARIANCE,
+            numerical_scaling="per_name",
+            verify_hard_constraints=True,
         )
         baseline_plan = baseline_frontier.select(parsed_aversion)
 
@@ -100,6 +102,8 @@ def run_historical_experiment(
             inventory_alpha_model=CapacitySlackConfidenceAlphaModel(
                 parsed_aversion
             ),
+            numerical_scaling="per_name",
+            verify_hard_constraints=True,
         )
         challenger_frontier_plan = challenger_frontier.select(parsed_aversion)
         challenger_config = replace(
@@ -336,6 +340,8 @@ def run_historical_experiment(
         "event_count": len(bundle.events),
         "risk_aversion": parsed_aversion.value,
         "solver": solver,
+        "numerical_scaling": "per_name",
+        "verify_hard_constraints": True,
         "liquidity_quantile": LIQUIDITY_QUANTILE_BY_RISK[
             parsed_aversion.value
         ],
@@ -406,7 +412,7 @@ def main() -> None:
         choices=("high", "medium", "low"),
         default="medium",
     )
-    parser.add_argument("--solver", default="OSQP")
+    parser.add_argument("--solver", default="CLARABEL")
     parser.add_argument(
         "--output-prefix",
         type=Path,
