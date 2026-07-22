@@ -1,0 +1,22 @@
+gate,passed,baseline_or_limit,candidate,criterion
+mean_pnl_within_1bp_per_event,False,16.935513337240987,13.262582684833633,candidate >= baseline - 1 bp/event
+lower_event_pnl_volatility,True,55.744857375890426,54.03505809841621,candidate <= baseline - 0.05 bp
+no_higher_loss_cvar,False,61.87698874609269,65.66687236624959,candidate <= baseline + 0.05 bp
+no_higher_within_event_drawdown,True,45.872058580989666,43.16511571634626,candidate <= baseline + 0.05 bp
+urgent_never_later,True,0.0,0.0,maximum paired start delta <= 0 days
+small_never_earlier,True,0.0,0.0,minimum paired start delta >= 0 days
+early_factor_within_1pp,True,5.227020433992911,2.5164010449892067,candidate <= baseline + 1 percentage point
+late_early_ramp_preserves_90pct,True,1.2047515623042717,1.4149156736676154,"candidate >= max(1.0, 90% of baseline)"
+rank_ramp_preserved,True,0.16666666666666663,0.3969696969696969,candidate >= baseline - 0.10
+nondecreasing_steps_preserved,True,5.25,6.083333333333333,candidate >= baseline - 1 transition
+participation_caps_hard,False,0.05,0.26117084741417784,maximum cap excess <= 0.05 shares
+direction_hard,True,0.001,0.0006933808274345449,maximum wrong-way trade <= 0.001 shares
+completion_hard,True,0.001,2.992921508848667e-06,maximum terminal error <= 0.001 shares
+lower_realized_impact_cost,True,4058578.1173808235,3976046.941472054,candidate total realized impact cost < baseline
+p95_realized_participation_preserved,True,0.11241093127631639,0.10451860717578686,candidate mean event p95 <= baseline + 0.5 percentage point
+max_realized_participation_preserved,True,0.17846606733314885,0.15577103453066618,candidate maximum <= baseline + 1 percentage point
+pnl_recovery_vs_full_specific,False,0.5,-0.7829114396950185,challenger improves mean P&L by at least 0.50 bp/event
+volatility_within_1bp_of_control,False,53.93437706737655,54.03505809841621,challenger P&L volatility <= control + 1.00 bp
+factor_within_075pp_of_control,True,3.853319879636403,2.5164010449892067,challenger early factor imbalance <= control + 0.75 pp
+ramp_preserves_90pct_of_control,False,1.521035074733885,1.4149156736676154,challenger late/early ratio >= 90% of control
+volatility_below_static_by_005bp,True,55.69485737589043,54.03505809841621,challenger P&L volatility <= baseline - 0.05 bp

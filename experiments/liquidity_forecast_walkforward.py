@@ -172,6 +172,15 @@ def factor_stress_fraction_for_risk_profile(
     return 1.0 - preference.risk_frontier_fraction
 
 
+def specific_risk_fraction_for_risk_profile(
+    risk_aversion: RiskAversion | str,
+) -> float:
+    """Retain more single-name risk protection for defensive profiles."""
+
+    preference = DEFAULT_RISK_PREFERENCES[RiskAversion.parse(risk_aversion)]
+    return max(0.25, 1.0 - preference.risk_frontier_fraction)
+
+
 def liquidity_shape_fraction_for_risk_profile(
     risk_aversion: RiskAversion | str,
 ) -> float:
@@ -266,10 +275,13 @@ class MinimaxFactorStressRiskModel:
     risk_aversion: RiskAversion
     specific_overlays: tuple[object, ...] = ()
     stress_fraction: float | None = None
+    specific_risk_fraction: float = 1.0
 
     def __post_init__(self) -> None:
         if self.stress_fraction is not None and not 0.0 <= self.stress_fraction <= 1.0:
             raise ValueError("stress_fraction must be between zero and one")
+        if not 0.0 <= self.specific_risk_fraction <= 1.0:
+            raise ValueError("specific_risk_fraction must be between zero and one")
 
     @staticmethod
     def factor_indices(ctx: PlannerContext) -> list[int]:
@@ -283,7 +295,9 @@ class MinimaxFactorStressRiskModel:
         ctx: PlannerContext,
         date_index: int,
     ) -> cp.Expression:
-        base_risk = BarraFactorRiskModel().objective(
+        base_risk = BarraFactorRiskModel(
+            specific_variance_multiplier=self.specific_risk_fraction,
+        ).objective(
             position_shares,
             ctx,
             date_index,
@@ -583,6 +597,7 @@ def run_experiment(
     plan_selection_policy: str = "always_candidate",
     liquidity_shape_policy: str = "full",
     regret_policy: str = "none",
+    specific_risk_fraction: float = 1.0,
     numerical_scaling: str = "none",
     verify_hard_constraints: bool = False,
     event_seeds: tuple[int, ...] = LIQUIDITY_EVENT_SEEDS,
@@ -664,6 +679,8 @@ def run_experiment(
             "regret_policy must be 'none', 'baseline_relative_cvar', or "
             "'baseline_relative_second_moment'"
         )
+    if not np.isfinite(specific_risk_fraction) or not 0.0 <= specific_risk_fraction <= 1.0:
+        raise ValueError("specific_risk_fraction must be between zero and one")
     base_ctx, classifications = economic_fixture()
     alpha_uncertainty = _calibrated_alpha_uncertainty(base_ctx)
     calibration = calibrate_liquidity_distribution(base_ctx)
@@ -817,7 +834,10 @@ def run_experiment(
                     stress_model = (
                         EqualFactorStressRiskModel(parsed_aversion)
                         if applied_factor_policy == "equal_factor_stress"
-                        else MinimaxFactorStressRiskModel(parsed_aversion)
+                        else MinimaxFactorStressRiskModel(
+                            parsed_aversion,
+                            specific_risk_fraction=specific_risk_fraction,
+                        )
                     )
                     applied_config = replace(
                         applied_config,
@@ -1071,11 +1091,16 @@ def run_experiment(
                     if np.isfinite(forecast_alpha_floor_dollars)
                     else np.nan
                 ),
-                "factor_stress_fraction": (
-                    factor_stress_fraction_for_risk_profile(parsed_aversion)
-                    if applied_factor_policy != "barra"
-                    else 0.0
-                ),
+                    "factor_stress_fraction": (
+                        factor_stress_fraction_for_risk_profile(parsed_aversion)
+                        if applied_factor_policy != "barra"
+                        else 0.0
+                    ),
+                    "specific_risk_fraction": (
+                        specific_risk_fraction
+                        if applied_factor_policy == "minimax_factor_stress"
+                        else 1.0
+                    ),
                 "alpha_confidence": (
                     alpha_confidence_for_risk_profile(parsed_aversion)
                     if applied_alpha_policy == "capacity_slack_confidence"
@@ -1143,6 +1168,11 @@ def run_experiment(
                     "coefficient_policy": coefficient_policy,
                     "alpha_policy": applied_alpha_policy,
                     "factor_policy": applied_factor_policy,
+                    "specific_risk_fraction": (
+                        specific_risk_fraction
+                        if applied_factor_policy == "minimax_factor_stress"
+                        else 1.0
+                    ),
                     "profit_policy": applied_profit_policy,
                     "liquidity_shape_policy": (
                         applied_liquidity_shape_policy
@@ -1195,6 +1225,11 @@ def run_experiment(
                     coefficient_policy=coefficient_policy,
                     alpha_policy=applied_alpha_policy,
                     factor_policy=applied_factor_policy,
+                    specific_risk_fraction=(
+                        specific_risk_fraction
+                        if applied_factor_policy == "minimax_factor_stress"
+                        else 1.0
+                    ),
                     profit_policy=applied_profit_policy,
                     liquidity_shape_policy=(
                         applied_liquidity_shape_policy
@@ -1337,6 +1372,7 @@ def run_experiment(
         "coefficient_policy": coefficient_policy,
         "alpha_policy": alpha_policy,
         "factor_policy": factor_policy,
+        "specific_risk_fraction": specific_risk_fraction,
         "profit_policy": profit_policy,
         "plan_selection_policy": plan_selection_policy,
         "liquidity_shape_policy": liquidity_shape_policy,

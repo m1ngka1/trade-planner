@@ -97,6 +97,14 @@ class BarraFactorRiskModel:
     include_factors: Sequence[str] | None = None
     exclude_factors: Sequence[str] = ()
     specific_overlays: Sequence[SpecificRiskOverlay] = ()
+    specific_variance_multiplier: float = 1.0
+
+    def __post_init__(self) -> None:
+        multiplier = float(self.specific_variance_multiplier)
+        if not np.isfinite(multiplier) or multiplier < 0.0:
+            raise ValueError(
+                "specific_variance_multiplier must be finite and non-negative"
+            )
 
     def objective(
         self,
@@ -122,7 +130,9 @@ class BarraFactorRiskModel:
         specific_variance = np.maximum(specific_variance, 0.0)
 
         factor_risk = cp.quad_form(factor_dollars, factor_covariance)
-        specific_risk = cp.sum(cp.multiply(specific_variance, cp.square(position_dollars)))
+        specific_risk = self.specific_variance_multiplier * cp.sum(
+            cp.multiply(specific_variance, cp.square(position_dollars))
+        )
         return factor_risk + specific_risk
 
     def factor_indices(self, ctx: PlannerContext) -> list[int]:

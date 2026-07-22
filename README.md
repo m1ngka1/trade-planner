@@ -421,6 +421,15 @@ outcomes, and replays the selected coefficient vector. The included two-event
 smoke produces a complete 14-row candidate panel and matching coefficient
 audit, but correctly fails economic promotion gates and is not profit evidence.
 
+A spent-development systematic-first ablation also tested whether the model
+was overpricing diversified single-name risk. It kept full factor covariance
+and minimax country/sector/industry protection while the Medium profile priced
+50% of specific variance. Factor balance improved, but realized P&L fell
+another 0.78 bp/event versus the 100%-specific-risk control, loss-CVaR and the
+volume ramp worsened, and a hard cap certificate failed. The idea is recorded
+and discarded; no default coefficient or schedule changed. See
+[Systematic-first inventory risk](docs/systematic_first_risk.md).
+
 The deployment path also supports per-name numerical scaling: objectives keep
 their exact dollar economics in parent-order units, built-in hard constraints
 are dimensionless, and every result receives an independent raw-share cap,

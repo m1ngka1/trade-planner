@@ -23,12 +23,13 @@ from experiments.liquidity_forecast_walkforward import (
     run_experiment,
     risk_scaled_liquidity_forecast,
     simulate_liquidity_multipliers,
+    specific_risk_fraction_for_risk_profile,
 )
 from experiments.rebalance_economic_calibration import (
     EVENT_LIQUIDITY_CURVES,
     economic_fixture,
 )
-from trade_planner import RiskAversion
+from trade_planner import BarraFactorRiskModel, RiskAversion
 
 
 def test_fresh_liquidity_seeds_are_disjoint() -> None:
@@ -145,10 +146,35 @@ def test_risk_label_and_capacity_set_optional_alpha_hurdle() -> None:
     assert factor_stress_fraction_for_risk_profile(RiskAversion.HIGH) == 0.95
     assert factor_stress_fraction_for_risk_profile(RiskAversion.MEDIUM) == 0.50
     assert factor_stress_fraction_for_risk_profile(RiskAversion.LOW) == 0.0
+    assert specific_risk_fraction_for_risk_profile(RiskAversion.HIGH) == 0.95
+    assert specific_risk_fraction_for_risk_profile(RiskAversion.MEDIUM) == 0.50
+    assert specific_risk_fraction_for_risk_profile(RiskAversion.LOW) == 0.25
     assert regret_weight_for_risk_profile(RiskAversion.HIGH) == 0.95
     assert regret_weight_for_risk_profile(RiskAversion.MEDIUM) == 0.50
     assert regret_weight_for_risk_profile(RiskAversion.LOW) == 0.0
     assert float(np.mean(small)) > float(np.mean(urgent))
+
+
+def test_barra_specific_risk_multiplier_changes_only_specific_variance() -> None:
+    ctx, _ = economic_fixture()
+    position = cp.Constant(np.linspace(-100.0, 100.0, len(ctx.symbols)))
+
+    factor_only = BarraFactorRiskModel(
+        specific_variance_multiplier=0.0
+    ).objective(position, ctx, 0).value
+    half_specific = BarraFactorRiskModel(
+        specific_variance_multiplier=0.5
+    ).objective(position, ctx, 0).value
+    full_specific = BarraFactorRiskModel(
+        specific_variance_multiplier=1.0
+    ).objective(position, ctx, 0).value
+
+    assert half_specific == pytest.approx(
+        0.5 * (factor_only + full_specific),
+        rel=1e-12,
+    )
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        BarraFactorRiskModel(specific_variance_multiplier=-0.1)
 
 
 def test_risk_scaled_liquidity_shape_uses_existing_risk_budget_fraction() -> None:
