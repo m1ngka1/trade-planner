@@ -22,3 +22,5 @@ defensive_recourse,variance,risk_only_2bp,,-242.4933,-0.0207,-4.6103,-0.2021,0.0
 defensive_recourse,variance,risk_only_4bp,,-579.3219,0.4173,-4.5351,-0.0220,0.0203,discard,"higher volatility and higher within-event drawdown",defensive_rolling_dev_400
 proximal_trade_recourse,variance,automatic_95pct_single,,-571.1138,0.2694,-5.5809,-0.5541,-0.0135,discard,"higher volatility and within-event drawdown, plus one small-order timing failure",proximal_rolling_dev_medium
 proximal_trade_recourse,variance,automatic_95pct_simultaneous,,-532.3984,0.1910,-5.6890,-0.3855,-0.0035,discard,"higher volatility and within-event drawdown, plus one small-order timing failure",proximal_rolling_dev_medium_simultaneous
+forecast_error_path_risk,variance,predictive_variance_development,,38.7057,-0.1607,-0.2140,0.0324,0.0124,keep_for_holdout,"passed all 13 development gates without tuning",forecast_error_risk_dev
+forecast_error_path_risk,variance,predictive_variance_holdout,,-33.6722,0.0224,-0.0377,0.0259,0.0104,discard,"untouched holdout volatility rose 0.0224 bp instead of falling by the required 0.05 bp",forecast_error_risk_holdout

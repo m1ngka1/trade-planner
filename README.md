@@ -315,7 +315,7 @@ materiality floor. A stricter defensive hurdle regressed. Every forecast
 vintage, accepted/rejected replan, whole-share capacity handoff, automatically
 selected coefficient, gate, schedule, and chart is retained for later replay
 on real baskets; the production high/medium/low policy is unchanged and the
-synthetic holdout remains unopened.
+synthetic holdout was left unopened for those candidates.
 
 An optimizer-internal proximal revision cost was also tested. Its hurdle is
 automatically calibrated from forecast uncertainty and the selected
@@ -323,6 +323,15 @@ high/medium/low risk profile, but both 12-event trade-schedule variants raised
 realized volatility and within-event drawdown despite improving tail loss and
 early balance. A quadratic inventory-path form failed its two-event screen.
 These candidates are retained as research evidence, not production defaults.
+
+A forecast-error path-risk candidate subsequently passed every development
+gate without tuning, so the chronological holdout was opened exactly once. It
+prices market variance and forecast-estimation variance with the same
+automatically selected dollar-risk coefficient. The holdout preserved P&L,
+loss-CVaR, drawdown, urgency, small-order timing, factor balance, the volume
+ramp, and all hard constraints, but realized volatility rose 0.022 bp instead
+of falling by the required 0.05 bp. It is not promoted, and the now-spent
+holdout will not be reused for tuning.
 
 See [Point-in-time rebalance replay](docs/point_in_time_walkforward.md) for the
 data contract, every trial, keep/discard logic, and visual artifacts.

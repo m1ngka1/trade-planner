@@ -32,6 +32,7 @@ class PointInTimeRebalanceEvent:
     realized_impact_bps_at_10pct_adv: float | Array
     realized_linear_cost_bps: float | Array
     realized_available_at: pd.Timestamp | str
+    realized_adv_shares: Array | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,9 @@ class RealizedRebalanceMetrics:
     within_event_max_drawdown_dollars: float
     within_event_max_drawdown_bps: float
     terminal_completion_error_shares: float
+    max_realized_participation_rate: float
+    p95_realized_participation_rate: float
+    max_realized_participation_excess_shares: float
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -94,6 +98,7 @@ def validate_point_in_time_event(event: PointInTimeRebalanceEvent) -> None:
         event.ctx,
         "realized_linear_cost_bps",
     )
+    _realized_adv_matrix(event)
 
 
 def evaluate_realized_rebalance_schedule(
@@ -117,12 +122,13 @@ def evaluate_realized_rebalance_schedule(
         ctx,
         "realized_linear_cost_bps",
     )
+    realized_adv = _realized_adv_matrix(event)
 
     daily_holding = np.sum(cumulative * ctx.price * returns, axis=1)
     eta = (
         (impact_bps / 10_000.0)
         * ctx.price
-        / safe_numeric(0.10 * ctx.adv_shares)
+        / safe_numeric(0.10 * realized_adv)
     )
     daily_impact = np.sum(eta * np.square(trades), axis=1)
     daily_linear = np.sum(
@@ -130,6 +136,16 @@ def evaluate_realized_rebalance_schedule(
         axis=1,
     )
     daily_net = daily_holding - daily_impact - daily_linear
+    realized_participation = np.abs(trades) / safe_numeric(realized_adv)
+    realized_capacity = (
+        ctx.base_participation
+        * realized_adv
+        * np.asarray(ctx.is_open, dtype=float)
+    )
+    realized_capacity_excess = np.maximum(
+        np.abs(trades) - realized_capacity,
+        0.0,
+    )
     target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
     parent_gross = float(np.sum(np.abs(target * ctx.price[0])))
     terminal_error = float(np.sum(np.abs(np.sum(trades, axis=0) - target)))
@@ -147,6 +163,13 @@ def evaluate_realized_rebalance_schedule(
             10_000.0 * drawdown / max(parent_gross, 1e-12)
         ),
         terminal_completion_error_shares=terminal_error,
+        max_realized_participation_rate=float(np.max(realized_participation)),
+        p95_realized_participation_rate=float(
+            np.quantile(realized_participation, 0.95)
+        ),
+        max_realized_participation_excess_shares=float(
+            np.max(realized_capacity_excess)
+        ),
     )
     daily = pd.DataFrame(
         {
@@ -156,6 +179,19 @@ def evaluate_realized_rebalance_schedule(
             "linear_cost_dollars": daily_linear,
             "net_pnl_dollars": daily_net,
             "cumulative_net_pnl_dollars": np.cumsum(daily_net),
+            "max_realized_participation_rate": np.max(
+                realized_participation,
+                axis=1,
+            ),
+            "p95_realized_participation_rate": np.quantile(
+                realized_participation,
+                0.95,
+                axis=1,
+            ),
+            "max_realized_participation_excess_shares": np.max(
+                realized_capacity_excess,
+                axis=1,
+            ),
         }
     )
     return metrics, daily
@@ -236,6 +272,15 @@ def _strategy_summary(strategy: str, rows: pd.DataFrame) -> dict[str, object]:
         "max_terminal_completion_error_shares": float(
             rows["terminal_completion_error_shares"].max()
         ),
+        "max_realized_participation_rate": float(
+            rows["max_realized_participation_rate"].max()
+        ),
+        "mean_p95_realized_participation_rate": float(
+            rows["p95_realized_participation_rate"].mean()
+        ),
+        "max_realized_participation_excess_shares": float(
+            rows["max_realized_participation_excess_shares"].max()
+        ),
     }
 
 
@@ -288,6 +333,21 @@ def _realized_cost_matrix(
         raise ValueError(f"{name} must be scalar or have shape {expected_shape}")
     if not np.all(np.isfinite(matrix)) or np.any(matrix < 0):
         raise ValueError(f"{name} must contain finite non-negative values")
+    return matrix
+
+
+def _realized_adv_matrix(event: PointInTimeRebalanceEvent) -> np.ndarray:
+    value = (
+        event.ctx.adv_shares
+        if event.realized_adv_shares is None
+        else event.realized_adv_shares
+    )
+    matrix = np.asarray(value, dtype=float)
+    expected_shape = (len(event.ctx.dates), len(event.ctx.symbols))
+    if matrix.shape != expected_shape:
+        raise ValueError(f"realized_adv_shares must have shape {expected_shape}")
+    if not np.all(np.isfinite(matrix)) or np.any(matrix <= 0.0):
+        raise ValueError("realized_adv_shares must contain finite positive values")
     return matrix
 
 

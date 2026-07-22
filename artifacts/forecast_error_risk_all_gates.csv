@@ -1,0 +1,14 @@
+gate,passed,baseline_or_limit,candidate,criterion
+mean_pnl_within_1bp_per_event,True,20.297155270659903,20.30146008079677,candidate >= baseline - 1 bp/event
+lower_event_pnl_volatility,True,101.41820095489746,101.33222669483564,candidate <= baseline - 0.05 bp
+no_higher_loss_cvar,True,167.20160171178097,166.922072110835,candidate <= baseline + 0.05 bp
+no_higher_within_event_drawdown,True,50.584642357516266,50.51393678886183,candidate <= baseline + 0.05 bp
+urgent_never_later,True,0.0,0.0,maximum paired start delta <= 0 days
+small_never_earlier,True,0.0,0.0,minimum paired start delta >= 0 days
+early_factor_within_1pp,True,4.847258746989035,4.876435587337547,candidate <= baseline + 1 percentage point
+late_early_ramp_preserves_90pct,True,1.2784023641967508,1.2898031480252692,"candidate >= max(1.0, 90% of baseline)"
+rank_ramp_preserved,True,0.3217171717171717,0.32878787878787874,candidate >= baseline - 0.10
+nondecreasing_steps_preserved,True,5.666666666666667,5.708333333333333,candidate >= baseline - 1 transition
+participation_caps_hard,True,0.05,0.022690604921081103,maximum cap excess <= 0.05 shares
+direction_hard,True,0.001,7.21002167162275e-05,maximum wrong-way trade <= 0.001 shares
+completion_hard,True,0.001,1.0826624929904938e-07,maximum terminal error <= 0.001 shares

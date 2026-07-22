@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,36 @@ class WalkForwardTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "information_cutoff"):
             validate_point_in_time_event(leaked)
+
+    def test_realized_adv_drives_impact_and_participation_audit(self) -> None:
+        event, schedule = _event_and_schedule()
+        realized_adv = np.full((2, 2), 500.0)
+        event = replace(
+            event,
+            realized_adv_shares=realized_adv,
+            realized_impact_bps_at_10pct_adv=10.0,
+        )
+
+        metrics, daily = evaluate_realized_rebalance_schedule(event, schedule)
+
+        self.assertAlmostEqual(metrics.impact_cost_dollars, 0.2)
+        self.assertAlmostEqual(metrics.max_realized_participation_rate, 0.01)
+        self.assertAlmostEqual(metrics.p95_realized_participation_rate, 0.01)
+        self.assertAlmostEqual(
+            metrics.max_realized_participation_excess_shares,
+            0.0,
+        )
+        np.testing.assert_allclose(
+            daily["max_realized_participation_rate"],
+            [0.01, 0.01],
+        )
+
+    def test_point_in_time_contract_rejects_invalid_realized_adv(self) -> None:
+        event, _ = _event_and_schedule()
+        invalid = replace(event, realized_adv_shares=np.zeros((2, 2)))
+
+        with self.assertRaisesRegex(ValueError, "realized_adv_shares"):
+            validate_point_in_time_event(invalid)
 
 
 def _event_and_schedule() -> tuple[PointInTimeRebalanceEvent, pd.DataFrame]:

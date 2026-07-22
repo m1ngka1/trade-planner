@@ -2,8 +2,8 @@
 
 ## Decision
 
-Keep the replay infrastructure. Do not automatically apply either tested
-forecast-uncertainty adjustment.
+Keep the replay infrastructure. Do not automatically apply any tested
+forecast-uncertainty adjustment without real historical confirmation.
 
 The repository previously evaluated schedules with independent synthetic return
 scenarios, but it had no event-level contract that physically separated data
@@ -77,7 +77,8 @@ The data provider can optionally load `expected_return_uncertainty`, defined as
 the point-in-time standard error of each probability-weighted holding-return
 forecast. The core production policy does not use it automatically; it is
 available for controlled research through
-`ConfidenceAdjustedExpectedReturnAlphaModel`.
+`ConfidenceAdjustedExpectedReturnAlphaModel` and the recorded forecast-error
+path-risk experiment.
 
 ## Development experiment
 
@@ -273,6 +274,35 @@ loss-CVaR, drawdown, and rank-ramp gates. It was stopped before the 12-event
 development sweep. No proximal variant reached the chronological holdout, and
 none changes the production selector.
 
+### Idea 7: forecast-error path risk
+
+The seventh candidate treats expected-return estimation error as another
+source of accumulated P&L variance. Independent forecast errors contribute the
+sum of squared uncertainty-dollar exposures. A persistent error in the parent
+order direction contributes one squared horizon exposure, capturing an event
+call that makes additions and deletions jointly look too attractive.
+
+This is an investment-risk decomposition, not another free coefficient. A
+disjoint synthetic forecast history estimates the persistent directional scale
+at `0.552305`. Market and forecast-error variance are both dollars squared and
+receive the same automatically selected inventory-risk coefficient. The user
+still chooses only high, medium, or low risk aversion.
+
+| Split | P&L delta | Volatility delta | Loss-CVaR delta | Within-event DD delta | Factor delta | Ramp delta | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Development, events 1-12 | +$38.7k | -0.161 bp | -0.214 bp | -0.104 bp | +0.032 pp | +0.012 | Pass to holdout |
+| Untouched holdout, events 13-24 | -$33.7k | +0.022 bp | -0.038 bp | -0.037 bp | +0.026 pp | +0.010 | Fail volatility gate |
+| Combined, descriptive only | +$5.0k | -0.086 bp | -0.280 bp | -0.071 bp | +0.029 pp | +0.011 | Not a promotion test |
+
+Development passed all 13 predeclared gates without parameter tuning, so the
+chronological holdout was opened exactly once. The holdout preserved every
+operational and shape gate and slightly improved loss-CVaR, drawdown, and the
+volume ramp, but realized volatility rose by 0.022 bp instead of falling by at
+least 0.05 bp. That one failure rejects production promotion. The combined
+sample is useful description, not a substitute decision, and the spent holdout
+must not be tuned against. See [Forecast-error path risk](forecast_error_risk.md)
+for the full contract, automatic calibration, commands, and artifact map.
+
 ## Reproduce
 
 ```bash
@@ -315,6 +345,20 @@ env PYTHONPATH=. python experiments/rolling_horizon_walkforward.py \
   --proximal-basis trade \
   --risk-aversion medium \
   --output-prefix artifacts/proximal_rolling_dev_medium_simultaneous
+
+env PYTHONPATH=. python experiments/forecast_error_risk_walkforward.py \
+  --solver OSQP \
+  --event-start 0 \
+  --n-events 12 \
+  --risk-aversion medium \
+  --output-prefix artifacts/forecast_error_risk_dev
+
+env PYTHONPATH=. python experiments/forecast_error_risk_walkforward.py \
+  --solver OSQP \
+  --event-start 12 \
+  --n-events 12 \
+  --risk-aversion medium \
+  --output-prefix artifacts/forecast_error_risk_holdout
 ```
 
 Each prefix produces a trial ledger, paired event deltas, summary, complete
@@ -324,8 +368,8 @@ coefficient, complete factor exposure path, and every acceptance gate. The
 hybrid confirmation prefixes are
 `alpha_confidence_hybrid_dev_*` and `uncertainty_budget_hybrid_dev_*`.
 `artifacts/walkforward_research_ledger.csv` is the compact cross-trial index of
-all 23 full-development variants, their comparable deltas, decisions, reasons, and source
-artifact prefixes.
+25 recorded development/holdout trials, their comparable deltas, decisions,
+reasons, and source artifact prefixes.
 
 ## Production completion gate
 
