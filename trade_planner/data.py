@@ -96,6 +96,14 @@ class PlannerDataProvider:
         """Return probability-weighted expected holding returns, if available."""
         return None
 
+    def load_expected_return_uncertainty(
+        self,
+        symbols: Sequence[str],
+        dates: pd.DatetimeIndex,
+    ) -> pd.DataFrame | pd.Series | Array | None:
+        """Return point-in-time standard errors for expected holding returns."""
+        return None
+
     def load_impact_bps_at_10pct_adv(
         self,
         symbols: Sequence[str],
@@ -183,6 +191,20 @@ def build_context_from_provider(
         if expected_return_raw is not None
         else None
     )
+    expected_return_uncertainty_raw = provider.load_expected_return_uncertainty(
+        symbols,
+        dates,
+    )
+    expected_return_uncertainty = (
+        align_date_symbol_field(
+            expected_return_uncertainty_raw,
+            dates=dates,
+            symbols=symbols,
+            name="expected_return_uncertainty",
+        ).to_numpy(float)
+        if expected_return_uncertainty_raw is not None
+        else None
+    )
     impact_bps_raw = provider.load_impact_bps_at_10pct_adv(symbols, dates)
     impact_bps_at_10pct_adv = (
         align_date_symbol_field(
@@ -219,6 +241,7 @@ def build_context_from_provider(
         event_days=event_days,
         factor_risk_data=factor_risk_data,
         expected_return=expected_return,
+        expected_return_uncertainty=expected_return_uncertainty,
         impact_bps_at_10pct_adv=impact_bps_at_10pct_adv,
         linear_cost_bps=linear_cost_bps,
         return_residual_scenarios=return_residual_scenarios,
@@ -288,6 +311,7 @@ def assemble_context(
     factor_risk_data: FactorRiskData,
     metadata: dict[str, object] | None = None,
     expected_return: Array | None = None,
+    expected_return_uncertainty: Array | None = None,
     impact_bps_at_10pct_adv: Array | None = None,
     linear_cost_bps: Array | None = None,
     return_residual_scenarios: Array | None = None,
@@ -352,6 +376,16 @@ def assemble_context(
                 "expected_return",
             ).to_numpy(float)
             if expected_return is not None
+            else None
+        ),
+        expected_return_uncertainty=(
+            align_date_symbol_field(
+                expected_return_uncertainty,
+                dates,
+                symbols,
+                "expected_return_uncertainty",
+            ).to_numpy(float)
+            if expected_return_uncertainty is not None
             else None
         ),
         impact_bps_at_10pct_adv=(

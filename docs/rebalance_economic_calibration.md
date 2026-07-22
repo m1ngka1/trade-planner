@@ -198,10 +198,12 @@ profitability claim. `CalibratedRebalancePlan.economically_viable` is false when
 forecast expected net P&L is non-positive, so downstream workflow can flag a
 compulsory cost-minimizing execution instead of calling it a profit opportunity.
 
+The reusable point-in-time replay contract is now implemented in
+`trade_planner.walkforward`; see [Point-in-time rebalance replay](point_in_time_walkforward.md).
 The next high-value research steps are:
 
-1. walk-forward replay on actual rebalance baskets using point-in-time forecast,
-   close, VWAP, spread, impact, FX, financing, and borrow data;
+1. populate that replay with actual rebalance baskets using point-in-time
+   forecast, close, VWAP, spread, impact, FX, financing, and borrow data;
 2. walk-forward calibration of date-by-name TCA forecasts against realized
    spread, impact, and fill data;
 3. point-in-time scenario calibration by rebalance type, confidence, days to

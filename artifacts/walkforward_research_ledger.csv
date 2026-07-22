@@ -1,0 +1,16 @@
+idea,risk_model,selection_policy,confidence,pnl_delta_thousand_dollars,volatility_delta_bps,loss_cvar_delta_bps,early_factor_delta_pp,ramp_delta,status,reason,artifact_prefix
+alpha_confidence,variance,reselect_frontier,0.60,176.7746,-0.7368,1.0903,0.2316,0.0912,discard,"higher loss CVaR and a small-order timing failure",alpha_confidence_dev_60
+alpha_confidence,variance,reselect_frontier,0.65,-794.9053,2.3399,23.8839,0.6562,0.1216,discard,"lower P&L, higher volatility and CVaR, and a small-order timing failure",alpha_confidence_dev_65
+alpha_confidence,variance,reselect_frontier,0.70,1204.4593,3.3035,3.4787,0.8543,0.1739,discard,"higher volatility and CVaR and a small-order timing failure",alpha_confidence_dev_70
+alpha_confidence,variance,reselect_frontier,0.75,623.8169,0.9159,4.8488,1.0373,0.2548,discard,"higher volatility and CVaR and early factor balance above tolerance",alpha_confidence_walkforward_variance
+alpha_confidence,variance,fixed_risk,0.60,210.1581,-0.9205,1.0903,0.3392,0.1146,discard,"higher loss CVaR",alpha_confidence_fixed_dev_60
+alpha_confidence,variance,fixed_risk,0.65,296.3596,-1.2773,2.1941,0.5868,0.1738,discard,"higher loss CVaR",alpha_confidence_fixed_dev_65
+alpha_confidence,variance,fixed_risk,0.70,308.3950,-1.6615,3.4787,0.8662,0.2375,discard,"higher loss CVaR",alpha_confidence_fixed_dev_70
+alpha_confidence,variance,fixed_risk,0.75,260.1385,-1.9559,4.8488,1.1567,0.3067,discard,"higher loss CVaR and early factor balance above tolerance",alpha_confidence_fixed_dev_75
+alpha_confidence,hybrid_downside,fixed_risk,0.60,102.6549,-0.8954,1.0903,0.5185,0.1270,discard,"higher loss CVaR",alpha_confidence_hybrid_dev_60
+alpha_confidence,hybrid_downside,fixed_risk,0.70,122.6242,-1.4991,3.4787,1.1771,0.2703,discard,"higher loss CVaR and early factor balance above tolerance",alpha_confidence_hybrid_dev_70
+reliability_scaled_budget,variance,frontier_budget,,-170.2530,0.2142,0.0000,-0.0453,0.0105,discard,"did not reduce realized volatility",uncertainty_budget_dev
+reliability_scaled_budget,hybrid_downside,frontier_budget,,0.0000,0.0000,0.0000,0.0000,0.0000,discard,"contracted budget selected the same frontier candidate",uncertainty_budget_hybrid_dev
+frontier_uncertainty_tie,variance,paired_uncertainty,0.60,0.0000,0.0000,0.0000,0.0000,0.0000,inconclusive,"existing one-basis-point materiality threshold dominated forecast uncertainty in every event",frontier_uncertainty_dev
+frontier_uncertainty_tie,variance,paired_uncertainty,0.75,0.0000,0.0000,0.0000,0.0000,0.0000,inconclusive,"existing one-basis-point materiality threshold dominated forecast uncertainty in every event",frontier_uncertainty_dev
+frontier_uncertainty_tie,variance,paired_uncertainty,0.90,0.0000,0.0000,0.0000,0.0000,0.0000,inconclusive,"existing one-basis-point materiality threshold dominated forecast uncertainty in every event",frontier_uncertainty_dev

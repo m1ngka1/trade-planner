@@ -9,6 +9,7 @@ import pandas as pd
 from trade_planner import (
     BarraFactorRiskModel,
     CompositeCostModel,
+    ConfidenceAdjustedExpectedReturnAlphaModel,
     ExpectedReturnAlphaModel,
     LinearBpsCost,
     ParticipationCapModel,
@@ -318,6 +319,15 @@ class RebalanceCalibrationTests(unittest.TestCase):
                     index=dates,
                 )
 
+            def load_expected_return_uncertainty(self, symbols, dates):
+                return pd.DataFrame(
+                    {
+                        symbol: np.full(len(dates), (index + 1) / 100_000.0)
+                        for index, symbol in enumerate(symbols)
+                    },
+                    index=dates,
+                )
+
             def load_linear_cost_bps(self, symbols, dates):
                 return pd.DataFrame(
                     {
@@ -349,6 +359,10 @@ class RebalanceCalibrationTests(unittest.TestCase):
 
         self.assertEqual(ctx.expected_return.shape, (3, 2))
         np.testing.assert_allclose(ctx.expected_return[0], [0.0001, 0.0002])
+        np.testing.assert_allclose(
+            ctx.expected_return_uncertainty[0],
+            [0.00001, 0.00002],
+        )
         impact, linear = infer_execution_cost_matrices(ctx)
         self.assertEqual(impact.shape, (3, 2))
         self.assertEqual(linear.shape, (3, 2))
@@ -359,6 +373,40 @@ class RebalanceCalibrationTests(unittest.TestCase):
             ctx.return_scenario_weights,
             [0.1, 0.2, 0.3, 0.4],
         )
+
+    def test_confidence_adjusted_alpha_is_an_explicit_research_option(self) -> None:
+        ctx = _economic_context()
+        ctx = PlannerContext(
+            **{
+                **ctx.__dict__,
+                "expected_return_uncertainty": np.full_like(
+                    ctx.expected_return,
+                    0.0002,
+                ),
+            }
+        )
+
+        model = ConfidenceAdjustedExpectedReturnAlphaModel(confidence=0.75)
+        plan = build_rebalance_frontier(
+            ctx,
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0),
+            inventory_alpha_model=model,
+        ).select("medium")
+
+        self.assertIsInstance(
+            plan.config.inventory_alpha_model,
+            ConfidenceAdjustedExpectedReturnAlphaModel,
+        )
+        self.assertEqual(plan.config.inventory_alpha_model.confidence, 0.75)
+        self.assertGreater(plan.config.inventory_alpha_model.uncertainty_multiplier, 0.0)
+        production = calibrate_rebalance_plan(
+            ctx,
+            risk_aversion="medium",
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0),
+        )
+        self.assertIsInstance(production.config.inventory_alpha_model, ExpectedReturnAlphaModel)
 
 
 def _economic_context() -> PlannerContext:

@@ -22,7 +22,7 @@ from typing import Iterable, Mapping
 import numpy as np
 import pandas as pd
 
-from .alpha import ExpectedReturnAlphaModel
+from .alpha import ExpectedReturnAlphaModel, InventoryAlphaModel
 from .config import TradePlannerConfig
 from .constraints import default_constraints
 from .context import PlannerContext
@@ -291,12 +291,15 @@ def build_rebalance_frontier(
     risk_measure: RebalanceRiskMeasure | str = RebalanceRiskMeasure.AUTO,
     cvar_confidence: float = 0.95,
     max_optimization_scenarios: int | None = DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
+    inventory_alpha_model: InventoryAlphaModel | None = None,
 ) -> RebalanceFrontier:
     """Solve the expected-net-P&L versus accumulated-P&L-risk frontier."""
 
     if not np.isclose(cvar_confidence, 0.95):
         raise ValueError("rebalance calibration metrics currently require cvar_confidence=0.95")
     _validate_economic_context(ctx)
+    if inventory_alpha_model is None:
+        inventory_alpha_model = ExpectedReturnAlphaModel()
     impact_matrix, linear_matrix = infer_execution_cost_matrices(ctx)
     impact_bps, linear_bps = infer_execution_costs(ctx)
     risk_model = BarraFactorRiskModel()
@@ -427,7 +430,7 @@ def build_rebalance_frontier(
             constraints=default_constraints(),
             residual_risk_weight=0.0,
             inventory_risk_weight=variance_weight,
-            inventory_alpha_model=ExpectedReturnAlphaModel(),
+            inventory_alpha_model=inventory_alpha_model,
             inventory_path_risk_weight=path_risk_weight,
             inventory_path_risk_model=(
                 (
@@ -713,6 +716,17 @@ def _validate_economic_context(ctx: PlannerContext) -> None:
         )
     if not np.all(np.isfinite(ctx.expected_return)):
         raise ValueError("expected_return must contain finite values")
+    if ctx.expected_return_uncertainty is not None:
+        uncertainty = np.asarray(ctx.expected_return_uncertainty, dtype=float)
+        if uncertainty.shape != (len(ctx.dates), len(ctx.symbols)):
+            raise ValueError(
+                "expected_return_uncertainty shape must match planner dates and symbols: "
+                f"{(len(ctx.dates), len(ctx.symbols))}"
+            )
+        if not np.all(np.isfinite(uncertainty)) or np.any(uncertainty < 0):
+            raise ValueError(
+                "expected_return_uncertainty must contain finite non-negative values"
+            )
     if ctx.factor_exposure is None or ctx.factor_covariance is None or ctx.specific_variance is None:
         raise ValueError("automatic rebalance calibration requires complete factor risk data")
 

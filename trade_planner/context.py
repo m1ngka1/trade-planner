@@ -73,6 +73,7 @@ class PlannerContext:
     factor_covariance: Array | None = None
     specific_variance: Array | None = None
     expected_return: Array | None = None
+    expected_return_uncertainty: Array | None = None
     impact_bps_at_10pct_adv: Array | None = None
     linear_cost_bps: Array | None = None
     return_residual_scenarios: Array | None = None

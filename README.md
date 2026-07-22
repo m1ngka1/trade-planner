@@ -276,6 +276,38 @@ the 256/96/64 runtime comparison. See
 mean-stress and second-moment decisions. The economic experiment complements
 rather than replaces the fixed shape gates in `daily_volume_behavior.py`.
 
+## Point-in-Time Walk-Forward Replay
+
+Use `PointInTimeRebalanceEvent` to keep the optimizer snapshot physically
+separate from realized returns and execution costs, then compare strategies
+chronologically with `replay_rebalance_events`. The replay validates information
+cutoffs and reports realized P&L, costs, volatility, loss CVaR, drawdown, and
+completion error in dollars and basis points of parent gross.
+
+```python
+from trade_planner import PointInTimeRebalanceEvent, replay_rebalance_events
+
+event = PointInTimeRebalanceEvent(
+    event_id="rebalance-001",
+    as_of=as_of,
+    information_cutoff=as_of,
+    ctx=point_in_time_ctx,
+    realized_returns=realized_returns,
+    realized_impact_bps_at_10pct_adv=realized_impact,
+    realized_linear_cost_bps=realized_linear_cost,
+    realized_available_at=realized_available_at,
+)
+replay = replay_rebalance_events([event], strategies)
+```
+
+The recorded development experiment rejected automatic alpha-confidence
+haircuts and uncertainty-scaled risk budgets because they failed strict realized
+downside gates. An uncertainty-aware tie rule was also redundant with the
+existing one-basis-point economic-materiality rule. They remain research options
+rather than production defaults.
+See [Point-in-time rebalance replay](docs/point_in_time_walkforward.md) for the
+data contract, every trial, keep/discard logic, and visual artifacts.
+
 ## CVXPY Model Diagnostics
 
 For a worked three-name example with a real CLARABEL failure and a transparent
@@ -405,6 +437,7 @@ The provider implements:
 - `load_specific_variance(symbols, dates)`
 - optional `load_event_volatility(symbols, dates)`: returns event jump volatility used by the earnings risk overlay
 - optional `load_expected_return(symbols, dates)`: probability-weighted expected return earned by accumulated inventory after each planner date
+- optional `load_expected_return_uncertainty(symbols, dates)`: point-in-time standard error of the expected-return forecast for controlled walk-forward research
 - optional `load_impact_bps_at_10pct_adv(symbols, dates)` and `load_linear_cost_bps(symbols, dates)`: date/name TCA surfaces
 - optional `load_return_residual_scenarios(symbols, dates)`: scenario-by-date-by-name holding-return residuals for hybrid downside risk
 - optional `load_return_scenario_weights(symbols, dates)`: one probability per residual-return scenario

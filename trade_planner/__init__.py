@@ -1,6 +1,10 @@
 """Pluggable daily basket execution planner."""
 
-from .alpha import ExpectedReturnAlphaModel, InventoryAlphaModel
+from .alpha import (
+    ConfidenceAdjustedExpectedReturnAlphaModel,
+    ExpectedReturnAlphaModel,
+    InventoryAlphaModel,
+)
 from .analytics import cumulative_side_completion
 from .calibration import (
     DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
@@ -96,6 +100,14 @@ from .risk import (
     StaticCovarianceRiskModel,
 )
 from .types import InfeasiblePlanError
+from .walkforward import (
+    PointInTimeRebalanceEvent,
+    RealizedRebalanceMetrics,
+    WalkForwardReplay,
+    evaluate_realized_rebalance_schedule,
+    replay_rebalance_events,
+    validate_point_in_time_event,
+)
 
 __all__ = [
     "AdaptiveAnnouncementParticipation",
@@ -104,6 +116,7 @@ __all__ = [
     "AnnouncementParticipationModifier",
     "CompositeCostModel",
     "CalibratedRebalancePlan",
+    "ConfidenceAdjustedExpectedReturnAlphaModel",
     "ConstraintDiagnostics",
     "ConstraintPlugin",
     "DiagnosticMOSEK",
@@ -130,10 +143,12 @@ __all__ = [
     "PiecewiseEarningsParticipation",
     "PlannerContext",
     "PlannerDataProvider",
+    "PointInTimeRebalanceEvent",
     "QuadraticParticipationImpact",
     "RebalanceEconomicMetrics",
     "RebalanceFrontier",
     "RebalanceRiskMeasure",
+    "RealizedRebalanceMetrics",
     "RiskAversion",
     "RiskModel",
     "RiskPreference",
@@ -148,6 +163,7 @@ __all__ = [
     "TradePlannerConfig",
     "TradePlannerResult",
     "VariableDiagnostics",
+    "WalkForwardReplay",
     "ZeroTargetConstraint",
     "align_date_symbol_field",
     "align_factor_covariance",
@@ -173,6 +189,7 @@ __all__ = [
     "diagnose_infeasible_problem",
     "diagnose_problem",
     "evaluate_rebalance_schedule",
+    "evaluate_realized_rebalance_schedule",
     "format_diagnosis",
     "format_infeasibility_diagnosis",
     "get_constraint_diagnostics",
@@ -180,8 +197,10 @@ __all__ = [
     "infer_execution_costs",
     "infer_execution_cost_matrices",
     "normalize_orders",
+    "replay_rebalance_events",
     "with_diagnostics",
     "with_variable_diagnostics",
     "weighted_loss_var_cvar",
+    "validate_point_in_time_event",
     "announcement_participation_rates",
 ]
