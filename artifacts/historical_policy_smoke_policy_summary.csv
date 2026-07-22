@@ -1,0 +1,4 @@
+risk_aversion,event_count,mean_selected_net_pnl_bps,mean_fallback_net_pnl_bps,mean_net_pnl_delta_bps,selected_pnl_vol_bps,fallback_pnl_vol_bps,selected_loss_cvar_95_bps,fallback_loss_cvar_95_bps,mean_selected_drawdown_bps,mean_policy_aggressiveness,all_selected_hard_pass,selected_behavior_pass_rate,economically_viable_selection_rate
+high,0,,,,,,,,,,False,,
+medium,0,,,,,,,,,,False,,
+low,0,,,,,,,,,,False,,

@@ -1,0 +1,8 @@
+gate,threshold,observed,passed
+calibrated_rmse_improves_at_least_10pct,>= 0.10,0.4076764829544008,True
+directional_sign_accuracy_not_lower,calibrated >= raw,0.10624999999999996,True
+predictive_interval_80_coverage,0.65 to 0.95,0.94375,True
+current_and_future_realized_returns_are_inaccessible,exactly invariant,True,True
+unseen_classifications_predict,finite without refit,True,True
+four_event_warmup_uses_raw_forecast,first four events,True,True
+full_repository_test_suite,all tests pass,True,True

@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 from experiments.historical_replay import run_historical_experiment
-from trade_planner import load_historical_replay_bundle
+from experiments.historical_policy_panel import run_historical_policy_panel
+from trade_planner import InvestmentPolicyCoefficients, load_historical_replay_bundle
 
 
 def test_load_historical_bundle_aligns_all_point_in_time_fields(tmp_path: Path) -> None:
@@ -39,9 +40,36 @@ def test_load_historical_bundle_aligns_all_point_in_time_fields(tmp_path: Path) 
         bundle.forecast_adv_for("event_01", "medium")[:, 0],
         [850.0, 1_050.0, 1_350.0],
     )
+    np.testing.assert_allclose(
+        bundle.forecast_adv_quantile("event_01", 0.175)[:, 0],
+        np.sqrt(
+            np.asarray([800.0, 1_000.0, 1_300.0])
+            * np.asarray([850.0, 1_050.0, 1_350.0])
+        ),
+    )
     assert bundle.classifications["event_01"].loc["SMALL_BUY", "urgency"] == "small"
     assert first.ctx.metadata["historical_bundle_role"] == "development"
     assert first.ctx.metadata["source_hashes"] == dict(bundle.source_hashes)
+
+
+def test_loader_preserves_optional_alpha_classifications(tmp_path: Path) -> None:
+    _write_bundle(tmp_path)
+    order_path = tmp_path / "orders.csv"
+    orders = pd.read_csv(order_path)
+    orders["rebalance_type"] = "add_delete"
+    orders["prediction_confidence"] = 0.80
+    orders["crowding"] = 0.35
+    orders.to_csv(order_path, index=False)
+
+    bundle = load_historical_replay_bundle(
+        tmp_path,
+        expected_role="development",
+    )
+    classifications = bundle.classifications["event_01"]
+
+    assert classifications.loc["URGENT_BUY", "rebalance_type"] == "add_delete"
+    assert classifications.loc["HEDGE_SELL", "prediction_confidence"] == 0.80
+    assert classifications.loc["SMALL_BUY", "crowding"] == 0.35
 
 
 def test_loader_rejects_future_planning_information(tmp_path: Path) -> None:
@@ -124,6 +152,10 @@ def test_historical_runner_produces_auditable_baseline_comparison(
         "coefficients",
         "frontiers",
         "source_hashes",
+        "alpha_audit",
+        "alpha_predictions",
+        "alpha_summary",
+        "alpha_coefficients",
     }
     assert len(outputs["trials"]) == 4
     assert len(outputs["paired"]) == 2
@@ -141,6 +173,86 @@ def test_historical_runner_produces_auditable_baseline_comparison(
     assert (candidate_coefficients["factor_stress_fraction"] == 0.50).all()
     assert metadata["cohort_role"] == "development"
     assert metadata["source_hashes"] == dict(bundle.source_hashes)
+    assert metadata["alpha_calibration"] == "walk_forward"
+    assert metadata["alpha_calibrated_event_count"] == 0
+    assert outputs["alpha_audit"]["status"].eq("raw_fallback").all()
+
+
+def test_historical_runner_consumes_selected_policy_vector(tmp_path: Path) -> None:
+    _write_bundle(tmp_path)
+    bundle = load_historical_replay_bundle(tmp_path, expected_role="development")
+    policy = InvestmentPolicyCoefficients(
+        policy_id="learned_medium",
+        policy_aggressiveness=0.40,
+        risk_frontier_fraction=0.40,
+        liquidity_quantile=0.175,
+        liquidity_shape_fraction=0.60,
+        alpha_confidence=0.80,
+        factor_stress_fraction=0.60,
+    )
+
+    outputs, metadata = run_historical_experiment(
+        bundle,
+        risk_aversion="medium",
+        solver="CLARABEL",
+        policy_coefficients=policy,
+    )
+    candidate = outputs["coefficients"].loc[
+        outputs["coefficients"]["strategy"].eq("forecast_liquidity")
+    ]
+
+    assert metadata["policy_source"] == "supplied"
+    assert metadata["policy_ids"] == ["learned_medium"]
+    assert metadata["risk_frontier_fraction"] == 0.40
+    assert metadata["liquidity_quantile"] == 0.175
+    assert candidate["policy_id"].eq("learned_medium").all()
+    assert candidate["liquidity_quantile"].eq(0.175).all()
+    assert candidate["liquidity_shape_fraction"].eq(0.60).all()
+    assert candidate["alpha_confidence"].eq(0.80).all()
+    assert candidate["factor_stress_fraction"].eq(0.60).all()
+
+
+def test_historical_policy_panel_selects_and_replays_complete_ladder(
+    tmp_path: Path,
+) -> None:
+    _write_bundle(tmp_path)
+    bundle = load_historical_replay_bundle(tmp_path, expected_role="development")
+
+    outputs, metadata = run_historical_policy_panel(
+        bundle,
+        risk_aversion="medium",
+        solver="CLARABEL",
+    )
+    panel = outputs["policy_trials"]
+    medium = outputs["policy_selections"].loc[
+        outputs["policy_selections"]["risk_aversion"].eq("medium")
+    ]
+    selected_coefficients = outputs["coefficients"].loc[
+        outputs["coefficients"]["strategy"].eq("forecast_liquidity"),
+        ["event_id", "policy_id"],
+    ].sort_values("event_id").reset_index(drop=True)
+    expected_coefficients = medium[
+        ["event_id", "selected_policy_id"]
+    ].rename(columns={"selected_policy_id": "policy_id"}).sort_values(
+        "event_id"
+    ).reset_index(drop=True)
+
+    assert len(panel) == 14
+    assert panel["event_id"].nunique() == 2
+    assert panel["policy_id"].nunique() == 7
+    assert panel.groupby("event_id")["policy_id"].nunique().eq(7).all()
+    assert panel["hard_pass"].dtype == bool
+    assert panel["behavior_pass"].dtype == bool
+    assert medium["status"].eq("fallback_warmup").all()
+    assert medium["selected_policy_id"].eq("policy_0500").all()
+    pd.testing.assert_frame_equal(selected_coefficients, expected_coefficients)
+    assert outputs["policy_schedules"]["policy_id"].nunique() == 7
+    assert outputs["alpha_audit"]["status"].eq("raw_fallback").all()
+    assert set(outputs["source_hashes"]["file"]) == set(bundle.source_hashes)
+    assert metadata["automatic_policy_calibration"] is True
+    assert metadata["policy_candidate_count"] == 7
+    assert metadata["policy_trial_count"] == 14
+    assert metadata["policy_selection_status_counts"] == {"fallback_warmup": 2}
 
 
 def _write_bundle(root: Path) -> None:

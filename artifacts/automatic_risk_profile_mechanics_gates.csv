@@ -1,0 +1,8 @@
+gate,threshold,observed,passed
+current_and_future_outcomes_are_inaccessible,exactly invariant,True,True
+hard_and_behavior_failures_are_excluded,never selected,True,True
+profile_aggressiveness_is_monotonic,high <= medium <= low,True,True
+selected_mean_net_pnl_is_positive,> 0 for every profile,True,True
+fallback_pnl_preserved_within_1bp,>= -1 bp/event,0.0,True
+eight_event_warmup_uses_fallback,first eight events,True,True
+full_repository_test_suite,all tests pass,True,True

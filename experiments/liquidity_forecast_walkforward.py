@@ -110,6 +110,13 @@ class CapacitySlackConfidenceAlphaModel:
     """Charge forecast uncertainty only where execution has capacity slack."""
 
     risk_aversion: RiskAversion
+    confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.confidence is not None and not 0.50 <= self.confidence < 1.0:
+            raise ValueError(
+                "confidence must be between 0.50 inclusive and 1.0 exclusive"
+            )
 
     def objective(
         self,
@@ -140,7 +147,11 @@ class CapacitySlackConfidenceAlphaModel:
         target_sign = np.sign(
             ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
         )
-        confidence = alpha_confidence_for_risk_profile(self.risk_aversion)
+        confidence = (
+            alpha_confidence_for_risk_profile(self.risk_aversion)
+            if self.confidence is None
+            else float(self.confidence)
+        )
         hurdle = (
             NormalDist().inv_cdf(confidence)
             * uncertainty
@@ -183,6 +194,8 @@ def risk_scaled_liquidity_forecast(
     flat_adv: np.ndarray,
     forecast_adv: np.ndarray,
     risk_aversion: RiskAversion | str,
+    *,
+    shape_fraction: float | None = None,
 ) -> np.ndarray:
     """Shrink a positive ADV forecast toward flat ADV in log space."""
 
@@ -192,7 +205,13 @@ def risk_scaled_liquidity_forecast(
         raise ValueError("flat and forecast ADV must align")
     if np.any(flat <= 0.0) or np.any(forecast <= 0.0):
         raise ValueError("flat and forecast ADV must be positive")
-    fraction = liquidity_shape_fraction_for_risk_profile(risk_aversion)
+    fraction = (
+        liquidity_shape_fraction_for_risk_profile(risk_aversion)
+        if shape_fraction is None
+        else float(shape_fraction)
+    )
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("shape_fraction must be between zero and one")
     return flat * np.exp(fraction * np.log(forecast / flat))
 
 
@@ -246,6 +265,11 @@ class MinimaxFactorStressRiskModel:
 
     risk_aversion: RiskAversion
     specific_overlays: tuple[object, ...] = ()
+    stress_fraction: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.stress_fraction is not None and not 0.0 <= self.stress_fraction <= 1.0:
+            raise ValueError("stress_fraction must be between zero and one")
 
     @staticmethod
     def factor_indices(ctx: PlannerContext) -> list[int]:
@@ -272,10 +296,12 @@ class MinimaxFactorStressRiskModel:
             ctx.factor_covariance[date_index],
             dtype=float,
         )
-        stress_variance = (
+        fraction = (
             factor_stress_fraction_for_risk_profile(self.risk_aversion)
-            * float(np.median(np.diag(factor_covariance)))
+            if self.stress_fraction is None
+            else float(self.stress_fraction)
         )
+        stress_variance = fraction * float(np.median(np.diag(factor_covariance)))
         exposure = np.asarray(ctx.factor_exposure[date_index], dtype=float)
         position_dollars = cp.multiply(ctx.price[date_index], position_shares)
         factor_dollars = exposure.T @ position_dollars

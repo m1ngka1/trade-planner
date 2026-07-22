@@ -93,3 +93,55 @@ warm-up, keep the estimator infrastructure only if:
 Passing this test keeps a causal calibration pipeline for real development
 data. Only a later untouched real holdout can establish whether calibrated
 alpha preserves P&L while the optimizer reduces swing.
+
+## Implementation
+
+`trade_planner/alpha_decay.py` builds date-name observations in signed parent-
+order direction. Numeric fields are standardized using training history only;
+country, sector, industry, side, urgency, and rebalance-type levels are also
+learned from training only, so a new label maps to an all-zero unseen category
+instead of changing the fitted schema. Every historical event records its
+eligible training IDs, five cross-validation scores, selected penalty,
+coefficients, prediction, and predictive uncertainty.
+
+`experiments/historical_replay.py` enables this walk-forward calibration by
+default and applies the same calibrated event to the flat-liquidity baseline
+and forecast-liquidity challenger. Liquidity, optimizer risk prices, costs,
+hard constraints, and realized scoring are unchanged. The calibrated mean
+still enters the ordinary inventory-alpha objective, while its uncertainty
+enters the existing risk-profile confidence hurdle. There is no new manual
+optimizer coefficient and no imposed daily schedule.
+
+## Controlled result
+
+The fixed 14-event population used four warm-up events and scored 480
+date-name observations over the following ten events. All predeclared gates
+passed:
+
+| Metric | Raw | Calibrated | Result |
+|---|---:|---:|---|
+| Equal-event directional RMSE | 1.53 bp/day | 0.90 bp/day | 40.8% lower |
+| Directional sign accuracy | 74.4% | 85.0% | 10.6 pp higher |
+| Nominal 80% interval coverage | — | 94.4% | inside the 65–95% gate |
+| Current/future outcome perturbation | — | exactly invariant | pass |
+| Unseen country/sector/industry | — | finite prediction | pass |
+| Repository verification | — | 102 tests plus 2 subtests | pass |
+
+Decision: **keep the estimator infrastructure for a real development replay**.
+This is deliberately not a profit claim: the generating relationship is known
+in the controlled population. The next economic decision requires a frozen
+real development bundle, followed by one sealed historical holdout only if all
+existing profitability, swing, behavior, liquidity, and feasibility gates
+pass.
+
+Reproduce the evidence with:
+
+```bash
+env PYTHONPATH=. python experiments/alpha_decay_walkforward.py \
+  --full-suite-verified \
+  --output-prefix artifacts/alpha_decay_mechanics
+```
+
+Artifacts include the summary, seven gates, chronological audit, all
+predictions and uncertainties, fitted coefficients, and a four-panel PNG at
+`artifacts/alpha_decay_mechanics*`.

@@ -1,0 +1,2 @@
+observation_count,event_count,raw_rmse,calibrated_rmse,rmse_improvement_fraction,raw_sign_accuracy,calibrated_sign_accuracy,predictive_interval_80_coverage,decision,decision_reason
+480,10,0.00015267024016162717,9.04301736007313e-05,0.4076764829544008,0.74375,0.85,0.94375,keep,All predeclared estimator mechanics and repository checks passed.

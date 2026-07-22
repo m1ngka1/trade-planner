@@ -49,11 +49,51 @@ class HistoricalReplayBundle:
         risk = str(risk_aversion).strip().lower()
         if risk not in LIQUIDITY_QUANTILE_BY_RISK:
             raise ValueError("risk_aversion must be high, medium, or low")
+        quantile = LIQUIDITY_QUANTILE_BY_RISK[risk]
+        return self.forecast_adv_quantile(event_id, quantile)
+
+    def forecast_adv_quantile(
+        self,
+        event_id: str,
+        quantile: float,
+    ) -> np.ndarray:
+        """Return or log-interpolate an available point-in-time ADV quantile."""
+
         key = str(event_id)
         if key not in self.forecast_adv_quantiles:
             raise KeyError(f"unknown historical event_id: {key}")
-        quantile = LIQUIDITY_QUANTILE_BY_RISK[risk]
-        return np.asarray(self.forecast_adv_quantiles[key][quantile], dtype=float).copy()
+        requested = float(quantile)
+        available = sorted(float(value) for value in self.forecast_adv_quantiles[key])
+        if (
+            not np.isfinite(requested)
+            or requested < available[0]
+            or requested > available[-1]
+        ):
+            raise ValueError(
+                f"liquidity quantile must be between {available[0]:g} and "
+                f"{available[-1]:g}"
+            )
+        for value in available:
+            if np.isclose(requested, value, rtol=0.0, atol=1e-12):
+                return np.asarray(
+                    self.forecast_adv_quantiles[key][value],
+                    dtype=float,
+                ).copy()
+        upper_index = int(np.searchsorted(available, requested, side="right"))
+        lower = available[upper_index - 1]
+        upper = available[upper_index]
+        weight = (requested - lower) / (upper - lower)
+        lower_adv = np.asarray(
+            self.forecast_adv_quantiles[key][lower],
+            dtype=float,
+        )
+        upper_adv = np.asarray(
+            self.forecast_adv_quantiles[key][upper],
+            dtype=float,
+        )
+        return np.exp(
+            (1.0 - weight) * np.log(lower_adv) + weight * np.log(upper_adv)
+        )
 
 
 def load_historical_replay_bundle(
@@ -449,7 +489,11 @@ def _build_event(
         columns=symbols,
     )
     normalized_orders = orders.drop(columns=["event_id", "available_at"]).set_index("symbol")
-    classifications = normalized_orders[["country", "sector", "industry", "urgency"]].copy()
+    # Preserve every point-in-time order descriptor for downstream conditional
+    # alpha calibration. The four required balance fields are validated above;
+    # optional fields such as rebalance_type, prediction_confidence, and
+    # crowding remain available without becoming planner requirements.
+    classifications = normalized_orders.drop(columns=["target_shares"]).copy()
     ctx = assemble_context(
         orders=normalized_orders,
         dates=dates,

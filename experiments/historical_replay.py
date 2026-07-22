@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
@@ -24,11 +25,16 @@ from experiments.liquidity_forecast_walkforward import (
 from experiments.rebalance_economic_calibration import _behavior_metrics
 from experiments.rolling_horizon_walkforward import _schedule_audit
 from trade_planner import (
+    AlphaDecayWalkForward,
+    DEFAULT_RISK_PREFERENCES,
     HistoricalReplayBundle,
+    InvestmentPolicyCoefficients,
     RebalanceRiskMeasure,
     RiskAversion,
+    RiskPreference,
     TradePlanner,
     build_rebalance_frontier,
+    calibrate_alpha_decay_walk_forward,
     evaluate_realized_rebalance_schedule,
     evaluate_rebalance_schedule,
     load_historical_replay_bundle,
@@ -45,10 +51,53 @@ def run_historical_experiment(
     *,
     risk_aversion: str = "medium",
     solver: str = "CLARABEL",
+    alpha_calibration: str = "walk_forward",
+    policy_coefficients: (
+        InvestmentPolicyCoefficients
+        | Mapping[str, InvestmentPolicyCoefficients]
+        | None
+    ) = None,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
-    """Compare the flat-ADV baseline with the frozen minimax challenger."""
+    """Compare the flat-ADV baseline with the frozen minimax challenger.
+
+    Conditional alpha calibration is fitted event by event before either
+    strategy is solved, so both strategies receive the same leakage-safe
+    expected-return surface and predictive uncertainty.
+    """
 
     parsed_aversion = RiskAversion.parse(risk_aversion)
+    alpha_mode = str(alpha_calibration).strip().lower()
+    if alpha_mode not in {"none", "walk_forward"}:
+        raise ValueError("alpha_calibration must be 'none' or 'walk_forward'")
+    alpha_result: AlphaDecayWalkForward | None = None
+    if alpha_mode == "walk_forward":
+        alpha_result = calibrate_alpha_decay_walk_forward(bundle)
+        planning_events = alpha_result.events
+    else:
+        planning_events = bundle.events
+    if isinstance(policy_coefficients, Mapping):
+        missing_policy_events = set(bundle.event_ids).difference(policy_coefficients)
+        if missing_policy_events:
+            raise ValueError(
+                "policy_coefficients mapping is missing events: "
+                f"{sorted(missing_policy_events)}"
+            )
+        if any(
+            not isinstance(policy, InvestmentPolicyCoefficients)
+            for policy in policy_coefficients.values()
+        ):
+            raise TypeError(
+                "policy_coefficients mapping values must be "
+                "InvestmentPolicyCoefficients"
+            )
+    elif policy_coefficients is not None and not isinstance(
+        policy_coefficients,
+        InvestmentPolicyCoefficients,
+    ):
+        raise TypeError(
+            "policy_coefficients must be InvestmentPolicyCoefficients, an "
+            "event mapping, or None"
+        )
     trial_rows: list[dict[str, object]] = []
     paired_rows: list[dict[str, object]] = []
     schedule_rows: list[pd.DataFrame] = []
@@ -58,9 +107,25 @@ def run_historical_experiment(
     liquidity_rows: list[pd.DataFrame] = []
     coefficient_rows: list[dict[str, object]] = []
     frontier_rows: list[pd.DataFrame] = []
+    applied_policies: list[InvestmentPolicyCoefficients] = []
 
-    for event in bundle.events:
+    for event in planning_events:
         event_id = str(event.event_id)
+        event_policy = _event_policy_coefficients(
+            event_id,
+            parsed_aversion,
+            policy_coefficients,
+        )
+        applied_policies.append(event_policy)
+        preferences = {
+            **DEFAULT_RISK_PREFERENCES,
+            parsed_aversion: RiskPreference(
+                risk_frontier_fraction=event_policy.risk_frontier_fraction,
+                description=(
+                    "Automatically selected chronological investment policy."
+                ),
+            ),
+        }
         classifications = bundle.classifications[event_id]
         baseline_frontier = build_rebalance_frontier(
             event.ctx,
@@ -70,16 +135,20 @@ def run_historical_experiment(
             numerical_scaling="per_name",
             verify_hard_constraints=True,
         )
-        baseline_plan = baseline_frontier.select(parsed_aversion)
+        baseline_plan = baseline_frontier.select(
+            parsed_aversion,
+            preferences=preferences,
+        )
 
-        quantile_forecast_adv = bundle.forecast_adv_for(
+        quantile_forecast_adv = bundle.forecast_adv_quantile(
             event_id,
-            parsed_aversion.value,
+            event_policy.liquidity_quantile,
         )
         challenger_adv = risk_scaled_liquidity_forecast(
             event.ctx.adv_shares,
             quantile_forecast_adv,
             parsed_aversion,
+            shape_fraction=event_policy.liquidity_shape_fraction,
         )
         challenger_ctx = replace(
             event.ctx,
@@ -100,16 +169,23 @@ def run_historical_experiment(
             lambda_multipliers=LAMBDA_MULTIPLIERS,
             risk_measure=RebalanceRiskMeasure.VARIANCE,
             inventory_alpha_model=CapacitySlackConfidenceAlphaModel(
-                parsed_aversion
+                parsed_aversion,
+                confidence=event_policy.alpha_confidence,
             ),
             numerical_scaling="per_name",
             verify_hard_constraints=True,
         )
-        challenger_frontier_plan = challenger_frontier.select(parsed_aversion)
+        challenger_frontier_plan = challenger_frontier.select(
+            parsed_aversion,
+            preferences=preferences,
+        )
         challenger_config = replace(
             challenger_frontier_plan.config,
             inventory_risk_weight=baseline_plan.config.inventory_risk_weight,
-            risk_model=MinimaxFactorStressRiskModel(parsed_aversion),
+            risk_model=MinimaxFactorStressRiskModel(
+                parsed_aversion,
+                stress_fraction=event_policy.factor_stress_fraction,
+            ),
         )
         challenger_result = TradePlanner(challenger_config).solve(challenger_ctx)
         challenger_metrics = evaluate_rebalance_schedule(
@@ -189,29 +265,30 @@ def run_historical_experiment(
                     "strategy": strategy,
                     "cohort_role": bundle.role,
                     "risk_aversion": parsed_aversion.value,
+                    "policy_id": event_policy.policy_id,
+                    "policy_aggressiveness": event_policy.policy_aggressiveness,
+                    "risk_frontier_fraction": (
+                        event_policy.risk_frontier_fraction
+                    ),
                     "liquidity_quantile": (
                         0.50
                         if strategy == BASELINE_STRATEGY
-                        else LIQUIDITY_QUANTILE_BY_RISK[parsed_aversion.value]
+                        else event_policy.liquidity_quantile
                     ),
                     "liquidity_shape_fraction": (
                         0.0
                         if strategy == BASELINE_STRATEGY
-                        else liquidity_shape_fraction_for_risk_profile(
-                            parsed_aversion
-                        )
+                        else event_policy.liquidity_shape_fraction
                     ),
                     "alpha_confidence": (
                         0.50
                         if strategy == BASELINE_STRATEGY
-                        else alpha_confidence_for_risk_profile(parsed_aversion)
+                        else event_policy.alpha_confidence
                     ),
                     "factor_stress_fraction": (
                         0.0
                         if strategy == BASELINE_STRATEGY
-                        else factor_stress_fraction_for_risk_profile(
-                            parsed_aversion
-                        )
+                        else event_policy.factor_stress_fraction
                     ),
                     "inventory_risk_weight": inventory_risk_weight,
                 }
@@ -332,7 +409,25 @@ def run_historical_experiment(
                 for name, digest in bundle.source_hashes.items()
             ]
         ),
+        "alpha_audit": (
+            alpha_result.audit if alpha_result is not None else pd.DataFrame()
+        ),
+        "alpha_predictions": (
+            alpha_result.predictions if alpha_result is not None else pd.DataFrame()
+        ),
+        "alpha_summary": (
+            alpha_result.summary if alpha_result is not None else pd.DataFrame()
+        ),
+        "alpha_coefficients": (
+            alpha_result.coefficients if alpha_result is not None else pd.DataFrame()
+        ),
     }
+    unique_policy_ids = sorted({policy.policy_id for policy in applied_policies})
+    first_policy = applied_policies[0]
+    constant_policy = all(
+        policy.as_dict() == first_policy.as_dict()
+        for policy in applied_policies[1:]
+    )
     metadata: dict[str, object] = {
         "decision": decision,
         "decision_reason": reason,
@@ -342,19 +437,66 @@ def run_historical_experiment(
         "solver": solver,
         "numerical_scaling": "per_name",
         "verify_hard_constraints": True,
-        "liquidity_quantile": LIQUIDITY_QUANTILE_BY_RISK[
-            parsed_aversion.value
-        ],
-        "liquidity_shape_fraction": liquidity_shape_fraction_for_risk_profile(
-            parsed_aversion
+        "alpha_calibration": alpha_mode,
+        "alpha_calibrated_event_count": (
+            int(alpha_result.audit["status"].eq("calibrated").sum())
+            if alpha_result is not None
+            else 0
         ),
-        "alpha_confidence": alpha_confidence_for_risk_profile(parsed_aversion),
-        "factor_stress_fraction": factor_stress_fraction_for_risk_profile(
-            parsed_aversion
+        "policy_source": (
+            "fixed_risk_profile" if policy_coefficients is None else "supplied"
+        ),
+        "policy_ids": unique_policy_ids,
+        "policy_aggressiveness": (
+            first_policy.policy_aggressiveness if constant_policy else np.nan
+        ),
+        "risk_frontier_fraction": (
+            first_policy.risk_frontier_fraction if constant_policy else np.nan
+        ),
+        "liquidity_quantile": (
+            first_policy.liquidity_quantile if constant_policy else np.nan
+        ),
+        "liquidity_shape_fraction": (
+            first_policy.liquidity_shape_fraction if constant_policy else np.nan
+        ),
+        "alpha_confidence": (
+            first_policy.alpha_confidence if constant_policy else np.nan
+        ),
+        "factor_stress_fraction": (
+            first_policy.factor_stress_fraction if constant_policy else np.nan
         ),
         "source_hashes": dict(bundle.source_hashes),
     }
     return outputs, metadata
+
+
+def _event_policy_coefficients(
+    event_id: str,
+    risk_aversion: RiskAversion,
+    supplied: (
+        InvestmentPolicyCoefficients
+        | Mapping[str, InvestmentPolicyCoefficients]
+        | None
+    ),
+) -> InvestmentPolicyCoefficients:
+    if isinstance(supplied, InvestmentPolicyCoefficients):
+        return supplied
+    if isinstance(supplied, Mapping):
+        return supplied[event_id]
+    preference = DEFAULT_RISK_PREFERENCES[risk_aversion]
+    return InvestmentPolicyCoefficients(
+        policy_id=f"fixed_{risk_aversion.value}",
+        policy_aggressiveness=preference.risk_frontier_fraction,
+        risk_frontier_fraction=preference.risk_frontier_fraction,
+        liquidity_quantile=LIQUIDITY_QUANTILE_BY_RISK[risk_aversion.value],
+        liquidity_shape_fraction=liquidity_shape_fraction_for_risk_profile(
+            risk_aversion
+        ),
+        alpha_confidence=alpha_confidence_for_risk_profile(risk_aversion),
+        factor_stress_fraction=factor_stress_fraction_for_risk_profile(
+            risk_aversion
+        ),
+    )
 
 
 def _historical_liquidity_frame(
@@ -414,6 +556,15 @@ def main() -> None:
     )
     parser.add_argument("--solver", default="CLARABEL")
     parser.add_argument(
+        "--alpha-calibration",
+        choices=("walk_forward", "none"),
+        default="walk_forward",
+        help=(
+            "Chronologically calibrate holding alpha from earlier available "
+            "events, or explicitly disable it."
+        ),
+    )
+    parser.add_argument(
         "--output-prefix",
         type=Path,
         default=Path("artifacts/historical_replay_development"),
@@ -427,6 +578,7 @@ def main() -> None:
         bundle,
         risk_aversion=args.risk_aversion,
         solver=args.solver,
+        alpha_calibration=args.alpha_calibration,
     )
     prefix: Path = args.output_prefix
     prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -441,6 +593,11 @@ def main() -> None:
     print(f"reason: {metadata['decision_reason']}")
     print(f"cohort role: {metadata['cohort_role']}")
     print(f"risk aversion: {metadata['risk_aversion']}")
+    print(
+        "alpha calibration: "
+        f"{metadata['alpha_calibration']} "
+        f"({metadata['alpha_calibrated_event_count']} calibrated events)"
+    )
     print(
         "automatic liquidity quantile/shape: "
         f"P{100 * metadata['liquidity_quantile']:.0f} / "

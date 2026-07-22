@@ -8,6 +8,8 @@ The package is intentionally split by extension point:
 - `data.py`: provider placeholders, field alignment, and context assembly
 - `participation.py`: participation caps and cap multipliers
 - `risk.py`: covariance models for cumulative inventory or residual positions
+- `alpha_decay.py`: leakage-safe conditional holding-alpha calibration
+- `policy_calibration.py`: chronological High/Medium/Low coefficient selection
 - `costs.py`: market-impact and linear-cost objective terms
 - `constraints.py`: pluggable cvxpy constraints
 - `planner.py`: core solve orchestration
@@ -389,6 +391,35 @@ source hashes before solving the flat-ADV baseline and frozen challenger. See
 schema and command. Its included synthetic smoke bundle validates plumbing
 only; profitability still requires a real development cohort followed by one
 untouched historical holdout.
+
+Before either replay strategy is solved, the runner now conditionally
+calibrates each event's directional holding-return path from only earlier
+events whose outcomes were already available at that event's information
+cutoff. Equal-event leave-one-event-out validation selects a dimensionless
+ridge penalty, and held-out residual error plus ridge leverage supplies the
+forecast uncertainty used by the existing High/Medium/Low alpha-confidence
+policy. The controlled mechanics screen improved RMSE by 40.8%, raised sign
+accuracy from 74.4% to 85.0%, and passed explicit leakage and unseen-GICS
+tests. Those results validate the estimator path, not real profitability. See
+[Point-in-time conditional alpha-decay calibration](docs/alpha_decay_calibration.md).
+
+High/Medium/Low can also be calibrated from a chronological event-policy
+panel instead of remaining a permanent coefficient lookup. One monotone policy
+coordinate generates the complete frontier, liquidity, alpha-confidence, and
+factor-stress vector. Earlier realized events first eliminate hard or behavior
+failures, then require a non-negative profile-specific P&L confidence bound,
+then apply the profile's realized-downside budget. The controlled mechanics
+screen excluded deliberately attractive unsafe policies, preserved monotonic
+risk ordering, and improved the Low fallback by 0.33 bp/event while reducing
+its P&L volatility. It proves selection mechanics only. See
+[Automatic investment-policy calibration](docs/automatic_risk_profile_calibration.md).
+
+The executable historical bridge is
+`experiments/historical_policy_panel.py`. It solves the frozen policy ladder,
+constructs hard/behavior evidence, selects each event from prior available
+outcomes, and replays the selected coefficient vector. The included two-event
+smoke produces a complete 14-row candidate panel and matching coefficient
+audit, but correctly fails economic promotion gates and is not profit evidence.
 
 The deployment path also supports per-name numerical scaling: objectives keep
 their exact dollar economics in parent-order units, built-in hard constraints

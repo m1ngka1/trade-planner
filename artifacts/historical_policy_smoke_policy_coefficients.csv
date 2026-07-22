@@ -1,0 +1,15 @@
+event_id,strategy,cohort_role,risk_aversion,policy_id,policy_aggressiveness,risk_frontier_fraction,liquidity_quantile,liquidity_shape_fraction,alpha_confidence,factor_stress_fraction,inventory_risk_weight
+event_01,forecast_liquidity,development,medium,policy_0050,0.05,0.05,0.12000000000000001,0.95,0.975,0.95,0.0013382730984424615
+event_02,forecast_liquidity,development,medium,policy_0050,0.05,0.05,0.12000000000000001,0.95,0.975,0.95,0.0013382730984424615
+event_01,forecast_liquidity,development,medium,policy_0200,0.2,0.2,0.18000000000000002,0.8,0.9,0.8,0.0004014819295327384
+event_02,forecast_liquidity,development,medium,policy_0200,0.2,0.2,0.18000000000000002,0.8,0.9,0.8,0.0004014819295327384
+event_01,forecast_liquidity,development,medium,policy_0350,0.35,0.35,0.24,0.65,0.825,0.65,0.0004014819295327384
+event_02,forecast_liquidity,development,medium,policy_0350,0.35,0.35,0.24,0.65,0.825,0.65,0.0004014819295327384
+event_01,forecast_liquidity,development,medium,policy_0500,0.5,0.5,0.30000000000000004,0.5,0.75,0.5,0.00013382730984424614
+event_02,forecast_liquidity,development,medium,policy_0500,0.5,0.5,0.30000000000000004,0.5,0.75,0.5,0.00013382730984424614
+event_01,forecast_liquidity,development,medium,policy_0650,0.65,0.65,0.36,0.35,0.675,0.35,0.00013382730984424614
+event_02,forecast_liquidity,development,medium,policy_0650,0.65,0.65,0.36,0.35,0.675,0.35,0.00013382730984424614
+event_01,forecast_liquidity,development,medium,policy_0800,0.8,0.8,0.42000000000000004,0.19999999999999996,0.6,0.19999999999999996,0.00013382730984424614
+event_02,forecast_liquidity,development,medium,policy_0800,0.8,0.8,0.42000000000000004,0.19999999999999996,0.6,0.19999999999999996,0.00013382730984424614
+event_01,forecast_liquidity,development,medium,policy_1000,1.0,1.0,0.5,0.0,0.5,0.0,0.00013382730984424614
+event_02,forecast_liquidity,development,medium,policy_1000,1.0,1.0,0.5,0.0,0.5,0.0,0.00013382730984424614

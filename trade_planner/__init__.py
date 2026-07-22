@@ -83,6 +83,14 @@ from .downside import (
 )
 from .mosek_diagnostics import DiagnosticMOSEK
 from .historical import HistoricalReplayBundle, load_historical_replay_bundle
+from .alpha_decay import (
+    DEFAULT_MIN_TRAINING_EVENTS,
+    RIDGE_MULTIPLIERS as ALPHA_DECAY_RIDGE_MULTIPLIERS,
+    AlphaDecayWalkForward,
+    ConditionalAlphaDecayModel,
+    calibrate_alpha_decay_walk_forward,
+    summarize_alpha_decay_predictions,
+)
 from .participation import (
     AdaptiveAnnouncementParticipation,
     AnnouncementParticipationCurve,
@@ -93,6 +101,15 @@ from .participation import (
     announcement_participation_rates,
 )
 from .planner import TradePlanner, TradePlannerResult
+from .policy_calibration import (
+    FALLBACK_AGGRESSIVENESS,
+    PROFILE_CONFIDENCE,
+    AutomaticRiskProfileCalibration,
+    InvestmentPolicyCoefficients,
+    build_monotone_policy_ladder,
+    calibrate_risk_profiles_walk_forward,
+    summarize_risk_profile_selections,
+)
 from .risk import (
     BarraFactorRiskModel,
     ExponentialEarningsRiskOverlay,
@@ -112,18 +129,23 @@ from .walkforward import (
 
 __all__ = [
     "AdaptiveAnnouncementParticipation",
+    "ALPHA_DECAY_RIDGE_MULTIPLIERS",
+    "AlphaDecayWalkForward",
+    "AutomaticRiskProfileCalibration",
     "BarraFactorRiskModel",
     "AnnouncementParticipationCurve",
     "AnnouncementParticipationModifier",
     "CompositeCostModel",
     "CalibratedRebalancePlan",
     "ConfidenceAdjustedExpectedReturnAlphaModel",
+    "ConditionalAlphaDecayModel",
     "ConstraintDiagnostics",
     "ConstraintPlugin",
     "DiagnosticMOSEK",
     "DailyGrossNotionalLimit",
     "DailyNetNotionalLimit",
     "DEFAULT_MAX_OPTIMIZATION_SCENARIOS",
+    "DEFAULT_MIN_TRAINING_EVENTS",
     "DEFAULT_RISK_PREFERENCES",
     "DirectionConstraint",
     "EarningsLinearPenalty",
@@ -131,10 +153,12 @@ __all__ = [
     "ExponentialEarningsRiskOverlay",
     "FactorRiskData",
     "FactorExposureLimit",
+    "FALLBACK_AGGRESSIVENESS",
     "HardCompletionConstraint",
     "HistoricalReplayBundle",
     "InfeasiblePlanError",
     "InventoryAlphaModel",
+    "InvestmentPolicyCoefficients",
     "InventoryPathRiskModel",
     "LinearBpsCost",
     "LogisticEarningsParticipation",
@@ -143,6 +167,7 @@ __all__ = [
     "ParticipationCapacityConstraint",
     "ParticipationCapModel",
     "PiecewiseEarningsParticipation",
+    "PROFILE_CONFIDENCE",
     "PlannerContext",
     "PlannerDataProvider",
     "PointInTimeRebalanceEvent",
@@ -175,9 +200,12 @@ __all__ = [
     "align_specific_variance",
     "assemble_context",
     "build_market_panel_from_provider",
+    "build_monotone_policy_ladder",
     "build_planner_dates",
     "build_context_from_provider",
     "build_rebalance_frontier",
+    "calibrate_alpha_decay_walk_forward",
+    "calibrate_risk_profiles_walk_forward",
     "calibrate_rebalance_plan",
     "centered_return_scenarios",
     "reduce_return_scenarios",
@@ -201,6 +229,8 @@ __all__ = [
     "load_historical_replay_bundle",
     "normalize_orders",
     "replay_rebalance_events",
+    "summarize_alpha_decay_predictions",
+    "summarize_risk_profile_selections",
     "with_diagnostics",
     "with_variable_diagnostics",
     "weighted_loss_var_cvar",
