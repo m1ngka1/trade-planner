@@ -333,8 +333,67 @@ ramp, and all hard constraints, but realized volatility rose 0.022 bp instead
 of falling by the required 0.05 bp. It is not promoted, and the now-spent
 holdout will not be reused for tuning.
 
+A separate point-in-time event-liquidity forecast produced the strongest
+synthetic swing reduction so far: medium-risk development volatility fell by
+9.18 bp, loss-CVaR by 15.93 bp, mean within-event drawdown by 7.52 bp, and
+realized impact by $391k. It nevertheless lost $1.33m of realized net P&L and
+made one small order start seven days earlier, so it is not promoted. A single
+median-liquidity sensitivity increased the P&L sacrifice to $2.51m. Its sealed
+holdout remains unopened. Keeping the automatically selected investment risk
+price invariant recovered $752k, reduced volatility by 10.07 bp, and passed 15
+of 16 gates, but still moved small names one day earlier in three events. The
+next recorded combination prices the option value of waiting from each name's
+capacity slack and point-in-time forecast uncertainty without adding a manual
+coefficient or fixed start-date rule. That candidate fixed small-order timing
+and improved volatility by 12.30 bp, but failed P&L and early factor balance.
+The following recorded ablation adds an automatically scaled equal-factor
+stress so country, sector, and industry hedges do not rely on estimated
+correlations remaining stable. It missed the focused factor gate by only 0.038
+percentage point and was stopped without tuning; the next fixed ablation uses
+a minimax factor norm at the same automatic economic scale. That minimax model
+passed all 16 development gates and retained strong swing, downside, factor,
+ramp, cost, and small-order improvements on the untouched holdout. It still
+lost 1.78 bp/event of P&L and is not promoted. The next fresh-cohort experiment
+adds the existing one-basis-point desk materiality as a convex forecast-profit
+floor rather than tuning against the spent holdout. Its CLARABEL mechanical
+screen failed before reaching the new constraint; that cohort is abandoned,
+and solver feasibility is checked only on already-spent development data before
+allocating another fresh OSQP cohort. OSQP also falsely classified the known-
+feasible quadratic net-P&L floor as infeasible, so the next bounded formulation
+used a linear holding-alpha floor and left impact in the objective and gates.
+That solve violated its own floor and sub-share hard tolerances. The next
+numerically stable policy selects between two complete optimizer schedules only
+when forecast-P&L materiality and hard-feasibility gates authorize the
+forecast-liquidity plan. Forecast P&L selected only three events and still lost
+1.46 bp/event while raising volatility. The next single-solve policy scales the
+event-liquidity shape automatically from the existing High/Medium/Low risk-
+budget fraction instead of selecting or blending completed schedules. The
+fixed medium policy passed every spent-development gate, improved P&L by $67k,
+and reduced volatility by 10.71 bp; a completely fresh events 73-84 validation
+then passed every gate. The untouched events 85-96 holdout retained volatility,
+CVaR, drawdown, factor, ramp, urgency, small-order, and impact improvements but
+lost 3.24 bp/event. It is not promoted. Further work should prioritize real
+point-in-time alpha-decay and TCA calibration over synthetic penalty tuning.
+Restoring raw alpha on a new events 97-108 validation still lost 2.89 bp/event.
+A baseline-relative quadratic tracking-risk overlay narrowed that sacrifice to
+2.53 bp/event and reduced volatility, drawdown, factor imbalance, and impact,
+but slightly increased loss-CVaR; its CVaR analogue was numerically unreliable.
+Both are discarded, events 109-120 remain sealed, and no further synthetic
+coefficient sweep is authorized by those results.
+
+The real-data replay path is now executable from a strict six-file tabular
+bundle. It checks point-in-time availability, complete date-symbol grids,
+factor covariance validity, explicit development/holdout authorization, and
+source hashes before solving the flat-ADV baseline and frozen challenger. See
+[Historical rebalance replay bundle](docs/historical_replay_bundle.md) for the
+schema and command. Its included synthetic smoke bundle validates plumbing
+only; profitability still requires a real development cohort followed by one
+untouched historical holdout.
+
 See [Point-in-time rebalance replay](docs/point_in_time_walkforward.md) for the
 data contract, every trial, keep/discard logic, and visual artifacts.
+See [Research priorities](docs/research_priorities.md) for the ranked next work,
+automatic High/Medium/Low coefficient map, and current production decision.
 
 ## CVXPY Model Diagnostics
 

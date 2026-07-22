@@ -1,0 +1,17 @@
+gate,passed,baseline_or_limit,candidate,criterion
+mean_pnl_within_1bp_per_event,True,-46.327182138264575,-40.50071144313383,candidate >= baseline - 1 bp/event
+lower_event_pnl_volatility,False,67.69179833363786,75.69672194014055,candidate <= baseline - 0.05 bp
+no_higher_loss_cvar,True,94.19251177069216,94.02637684059972,candidate <= baseline + 0.05 bp
+no_higher_within_event_drawdown,True,76.72174970830686,68.81383759947889,candidate <= baseline + 0.05 bp
+urgent_never_later,True,0.0,0.0,maximum paired start delta <= 0 days
+small_never_earlier,True,0.0,0.0,minimum paired start delta >= 0 days
+early_factor_within_1pp,True,5.05022415884517,5.3362976730390415,candidate <= baseline + 1 percentage point
+late_early_ramp_preserves_90pct,True,1.554176669987783,3.9651390699786795,"candidate >= max(1.0, 90% of baseline)"
+rank_ramp_preserved,True,0.6606060606060605,0.9939393939393939,candidate >= baseline - 0.10
+nondecreasing_steps_preserved,True,6.5,8.5,candidate >= baseline - 1 transition
+participation_caps_hard,True,0.05,0.022512069845106453,maximum cap excess <= 0.05 shares
+direction_hard,True,0.001,2.497233756564655e-05,maximum wrong-way trade <= 0.001 shares
+completion_hard,True,0.001,7.532071322202682e-08,maximum terminal error <= 0.001 shares
+lower_realized_impact_cost,True,569546.3245374782,494518.9955096567,candidate total realized impact cost < baseline
+p95_realized_participation_preserved,True,0.09695253051959052,0.0908425729420532,candidate mean event p95 <= baseline + 0.5 percentage point
+max_realized_participation_preserved,True,0.12618405925173604,0.11164409154677131,candidate maximum <= baseline + 1 percentage point

@@ -1,0 +1,5 @@
+event_id,strategy,coefficient_policy,alpha_policy,risk_aversion,liquidity_forecast_quantile,frontier_selected_inventory_risk_weight,inventory_risk_weight,risk_budget_dollars
+event_25,static_open_loop,baseline_locked,raw,medium,0.5,9.120811753644233e-08,9.120811753644233e-08,4080476.803433662
+event_25,forecast_liquidity,baseline_locked,capacity_slack_confidence,medium,0.25,9.120811753644233e-08,9.120811753644233e-08,4080476.803433662
+event_26,static_open_loop,baseline_locked,raw,medium,0.5,2.73624352609327e-08,2.73624352609327e-08,4135045.1683033677
+event_26,forecast_liquidity,baseline_locked,capacity_slack_confidence,medium,0.25,2.73624352609327e-08,2.73624352609327e-08,4135045.1683033677

@@ -303,6 +303,53 @@ sample is useful description, not a substitute decision, and the spent holdout
 must not be tuned against. See [Forecast-error path risk](forecast_error_risk.md)
 for the full contract, automatic calibration, commands, and artifact map.
 
+### Idea 8: point-in-time event-liquidity forecast
+
+The eighth candidate estimates a date/name ADV distribution from disjoint
+history and supplies a risk-label-dependent lower quantile to both physical
+capacity and the impact objective. Realized ADV remains outside the optimizer
+and scores realized impact plus actual participation. The schedule is still
+entirely optimizer-derived; no daily trade target or volume curve is imposed.
+
+| Medium-risk forecast | P&L delta | Volatility delta | Loss-CVaR delta | Mean drawdown delta | Impact delta | Ramp delta | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 25th percentile | -$1.333m | -9.182 bp | -15.935 bp | -7.521 bp | -$391k | +1.595 | Discard |
+| Median sensitivity | -$2.508m | -9.949 bp | -13.648 bp | -7.587 bp | -$334k | +2.147 | Discard |
+| 25th percentile, invariant risk price | -$580k | -10.069 bp | -15.935 bp | -8.442 bp | -$394k | +1.596 | Discard: one timing gate |
+
+Both candidates materially reduced swing and produced a much stronger rising
+volume profile, but both failed the one-basis-point-per-event P&L preservation
+gate and allowed a small order to start seven days earlier in at least one
+event. The median sensitivity made the investment trade-off worse, so the
+production quantile map is unchanged and events 37-48 remain sealed. Keeping
+the automatically selected investment risk price invariant recovered $752k
+and passed 15 of 16 gates, but three one-day small-order starts retained the
+strict timing failure. Pricing waiting optionality from capacity slack and
+forecast uncertainty then fixed small timing and reduced volatility by 12.30
+bp, but P&L fell 1.49 bp/event and factor imbalance worsened 1.35 pp. The next
+equal-factor correlation-break stress missed its focused factor gate by 0.038
+pp and was stopped before full development. A predeclared minimax-factor norm
+then passed every development gate and opened the holdout once. The untouched
+holdout retained large swing, factor, ramp, cost, and small-order improvements,
+but P&L fell 1.780 bp/event and rejected promotion. A fresh-cohort candidate now
+adds an automatic one-basis-point forecast-profit floor. Its predeclared
+CLARABEL screen crashed before the constraint was reached, so that cohort is
+abandoned rather than retried with a different solver. A spent-development
+OSQP screen proved the net-P&L floor feasible ex post but still returned false
+infeasibility. A linear holding-alpha floor then violated its own bound despite
+an optimal status. The next formulation selects between two complete optimizer
+plans using forecast-P&L materiality and hard-feasibility gates. That selector
+lost 1.464 bp/event and erased the volatility benefit. The next single-solve
+candidate scales the liquidity shape directly from the risk label; see
+[Point-in-time event-liquidity forecast](liquidity_forecast_walkforward.md).
+On spent development data that fixed medium policy improved P&L by $67k while
+reducing volatility 10.71 bp and passing every gate. It now requires a fully
+fresh events 73-84 validation before any new holdout may be opened. That fresh
+validation passed all gates, but the untouched events 85-96 holdout lost 3.242
+bp/event despite preserving the swing, factor, ramp, urgency, small-order, and
+cost improvements. It is not promoted; the next bottleneck is real point-in-
+time alpha timing skill rather than another synthetic risk coefficient.
+
 ## Reproduce
 
 ```bash
@@ -359,6 +406,13 @@ env PYTHONPATH=. python experiments/forecast_error_risk_walkforward.py \
   --n-events 12 \
   --risk-aversion medium \
   --output-prefix artifacts/forecast_error_risk_holdout
+
+env PYTHONPATH=. python experiments/liquidity_forecast_walkforward.py \
+  --solver OSQP \
+  --event-start 0 \
+  --n-events 12 \
+  --risk-aversion medium \
+  --output-prefix artifacts/liquidity_forecast_dev
 ```
 
 Each prefix produces a trial ledger, paired event deltas, summary, complete
@@ -368,14 +422,23 @@ coefficient, complete factor exposure path, and every acceptance gate. The
 hybrid confirmation prefixes are
 `alpha_confidence_hybrid_dev_*` and `uncertainty_budget_hybrid_dev_*`.
 `artifacts/walkforward_research_ledger.csv` is the compact cross-trial index of
-25 recorded development/holdout trials, their comparable deltas, decisions,
+45 recorded development/holdout trials, their comparable deltas, decisions,
 reasons, and source artifact prefixes.
 
 ## Production completion gate
 
-Populate `PointInTimeRebalanceEvent` objects from actual rebalance prediction
-snapshots and realized close/VWAP, fills, spread, impact, FX, financing, and
-borrow data. Then compare the current automatic high/medium/low policy against
-the desk baseline across enough independent events for stable tail estimates.
-Until that replay exists, synthetic expected P&L and `economically_viable` are
-model outputs, not proof that the strategy makes money.
+The repository now provides `load_historical_replay_bundle` and
+`experiments/historical_replay.py` to populate `PointInTimeRebalanceEvent`
+objects from an auditable six-file bundle and compare the current automatic
+High/Medium/Low challenger against the desk baseline. The loader checks
+availability timestamps, cohort roles, complete grids, factor covariance,
+liquidity quantiles, and source hashes. See
+[Historical rebalance replay bundle](historical_replay_bundle.md) for the exact
+schema and run command.
+
+The remaining completion gate is economic, not technical: export actual
+rebalance prediction snapshots and realized close/VWAP, fills, spread, impact,
+FX, financing, and borrow data into a frozen development bundle, then run one
+untouched historical holdout only after development passes. Until that replay
+exists, synthetic expected P&L and `economically_viable` are model outputs, not
+proof that the strategy makes money.

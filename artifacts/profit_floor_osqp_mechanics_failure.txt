@@ -1,0 +1,7 @@
+idea: automatic forecast-net-P&L floor
+status: crash
+command: env PYTHONPATH=. ./.conda-env/bin/python experiments/liquidity_forecast_walkforward.py --solver OSQP --n-events 2 --event-start 0 --risk-aversion medium --coefficient-policy baseline_locked --alpha-policy capacity_slack_confidence --factor-policy minimax_factor_stress --profit-policy baseline_materiality_floor --output-prefix artifacts/profit_floor_osqp_mechanics
+cohort: already-spent development events 25-26
+failure: OSQP reported the profit-floor constraint infeasible on event 25
+feasibility evidence: the previously solved event-25 minimax schedule has forecast net P&L -220907.01 dollars versus a floor of -272028.60 dollars, clearing it by 51121.58 dollars
+decision: reject the quadratic net-P&L-floor formulation as numerically unreliable; do not allocate a new cohort

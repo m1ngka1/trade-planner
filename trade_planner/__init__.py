@@ -82,6 +82,7 @@ from .downside import (
     weighted_loss_var_cvar,
 )
 from .mosek_diagnostics import DiagnosticMOSEK
+from .historical import HistoricalReplayBundle, load_historical_replay_bundle
 from .participation import (
     AdaptiveAnnouncementParticipation,
     AnnouncementParticipationCurve,
@@ -131,6 +132,7 @@ __all__ = [
     "FactorRiskData",
     "FactorExposureLimit",
     "HardCompletionConstraint",
+    "HistoricalReplayBundle",
     "InfeasiblePlanError",
     "InventoryAlphaModel",
     "InventoryPathRiskModel",
@@ -196,6 +198,7 @@ __all__ = [
     "get_variable_diagnostics",
     "infer_execution_costs",
     "infer_execution_cost_matrices",
+    "load_historical_replay_bundle",
     "normalize_orders",
     "replay_rebalance_events",
     "with_diagnostics",

@@ -1,0 +1,14 @@
+experiment: baseline-relative tail-regret insurance
+cohort: spent events 97-108
+solver: OSQP
+policy: raw alpha, baseline-locked risk price, risk-scaled liquidity, minimax factor stress, 50% CVaR-regret weight
+status: crash
+
+The first fixed-policy screen stopped with OSQP status user_limit before a
+comparable event set was produced. The CVaR threshold auxiliary variable had
+not participated in the planner's reference-objective normalization, so it was
+initialized to zero and the identical economics, seeds, solver, and gates were
+retried once. The retry again stopped with status user_limit.
+
+Decision: discard the CVaR-regret formulation. Do not switch solvers, tune the
+weight/confidence/scenario count, or allocate fresh events 121-144 to it.

@@ -1,0 +1,7 @@
+idea: automatic forecast-profit floor
+status: crash
+command: env PYTHONPATH=. ./.conda-env/bin/python experiments/profit_floor_walkforward.py --solver CLARABEL --n-events 2 --event-start 0 --risk-aversion medium --output-prefix artifacts/profit_floor_smoke
+cohort: fresh events 49-50
+failure: candidate forecast-liquidity frontier contained no solved candidates
+diagnosis: CLARABEL reported every forecast-liquidity frontier point infeasible before the profit-floor constraint was attached; the flat-ADV frontier retained only its zero-risk point
+decision: do not retry events 49-72 with another solver; record backend crash and keep their economic evidence unused

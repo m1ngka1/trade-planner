@@ -1,0 +1,7 @@
+event_id,symbol,target_shares,country,sector,industry,urgency,available_at
+event_01,URGENT_BUY,100.0,HK,IT,SW,urgent,2026-01-01T16:00:00Z
+event_01,HEDGE_SELL,-80.0,US,FIN,BANK,medium,2026-01-01T16:00:00Z
+event_01,SMALL_BUY,40.0,HK,IT,SW,small,2026-01-01T16:00:00Z
+event_02,URGENT_BUY,100.0,HK,IT,SW,urgent,2026-01-09T16:00:00Z
+event_02,HEDGE_SELL,-80.0,US,FIN,BANK,medium,2026-01-09T16:00:00Z
+event_02,SMALL_BUY,40.0,HK,IT,SW,small,2026-01-09T16:00:00Z
