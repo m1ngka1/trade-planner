@@ -35,7 +35,10 @@ from .costs import (
 )
 from .downside import (
     ScenarioCVaRRiskModel,
+    TailSecondMomentPathRiskModel,
     centered_return_scenarios,
+    reduce_return_scenarios,
+    tail_return_scenarios,
     weighted_loss_var_cvar,
 )
 from .participation import ParticipationCapModel
@@ -69,6 +72,7 @@ class RebalanceRiskMeasure(str, Enum):
     VARIANCE = "variance"
     DOWNSIDE_CVAR = "downside_cvar"
     HYBRID_DOWNSIDE = "hybrid_downside"
+    TAIL_SECOND_MOMENT = "tail_second_moment"
 
     @classmethod
     def parse(cls, value: RebalanceRiskMeasure | str) -> RebalanceRiskMeasure:
@@ -103,6 +107,12 @@ DEFAULT_RISK_PREFERENCES: Mapping[RiskAversion, RiskPreference] = {
         description="Allow the full feasible P&L-risk range and maximize expected net P&L.",
     ),
 }
+
+# Scenario objectives add one slack variable per path.  The recorded economic
+# benchmark found 96 tail-preserving representatives retained the selected
+# medium-risk schedule and independent CVaR while reducing frontier time by
+# almost four times.  Passing None explicitly remains available for audits.
+DEFAULT_MAX_OPTIMIZATION_SCENARIOS = 96
 
 
 @dataclass(frozen=True)
@@ -143,6 +153,7 @@ class CalibratedRebalancePlan:
     heterogeneous_tca: bool
     risk_measure: RebalanceRiskMeasure
     scenario_tail_overlay_fraction: float
+    optimization_scenario_count: int | None
 
 
 @dataclass(frozen=True)
@@ -161,6 +172,7 @@ class RebalanceFrontier:
     risk_measure: RebalanceRiskMeasure
     risk_metric_column: str
     scenario_tail_overlay_fraction: float
+    optimization_scenario_count: int | None
 
     def select(
         self,
@@ -227,6 +239,7 @@ class RebalanceFrontier:
             heterogeneous_tca=self.heterogeneous_tca,
             risk_measure=self.risk_measure,
             scenario_tail_overlay_fraction=self.scenario_tail_overlay_fraction,
+            optimization_scenario_count=self.optimization_scenario_count,
         )
 
 
@@ -239,20 +252,24 @@ def calibrate_rebalance_plan(
     heterogeneous_tca: bool = True,
     risk_measure: RebalanceRiskMeasure | str = RebalanceRiskMeasure.AUTO,
     cvar_confidence: float = 0.95,
+    max_optimization_scenarios: int | None = DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
 ) -> CalibratedRebalancePlan:
     """Solve a data-scaled frontier and select the best plan inside a risk budget."""
 
     parsed_aversion = RiskAversion.parse(risk_aversion)
     parsed_measure = RebalanceRiskMeasure.parse(risk_measure)
-    if (
-        parsed_measure is RebalanceRiskMeasure.AUTO
-        and ctx.return_residual_scenarios is not None
-        and parsed_aversion is RiskAversion.HIGH
-    ):
-        # Finite-scenario tail objectives can overfit the few observations in
-        # the extreme tail. The high-aversion policy therefore uses the stable
-        # covariance frontier; medium/low use the hybrid excess-tail overlay.
-        parsed_measure = RebalanceRiskMeasure.VARIANCE
+    if parsed_measure is RebalanceRiskMeasure.AUTO and ctx.return_residual_scenarios is not None:
+        if parsed_aversion is RiskAversion.HIGH:
+            # The high-aversion experiment found no material independent-tail
+            # improvement. Keep this profile on stable covariance risk.
+            parsed_measure = RebalanceRiskMeasure.VARIANCE
+        elif parsed_aversion is RiskAversion.LOW:
+            # Across five independent optimization samples, the tail second
+            # moment preserved low-profile mechanics and improved out-of-sample
+            # risk at a fraction of scenario-CVaR runtime.
+            parsed_measure = RebalanceRiskMeasure.TAIL_SECOND_MOMENT
+        else:
+            parsed_measure = RebalanceRiskMeasure.HYBRID_DOWNSIDE
 
     return build_rebalance_frontier(
         ctx,
@@ -261,6 +278,7 @@ def calibrate_rebalance_plan(
         heterogeneous_tca=heterogeneous_tca,
         risk_measure=parsed_measure,
         cvar_confidence=cvar_confidence,
+        max_optimization_scenarios=max_optimization_scenarios,
     ).select(parsed_aversion)
 
 
@@ -272,6 +290,7 @@ def build_rebalance_frontier(
     heterogeneous_tca: bool = True,
     risk_measure: RebalanceRiskMeasure | str = RebalanceRiskMeasure.AUTO,
     cvar_confidence: float = 0.95,
+    max_optimization_scenarios: int | None = DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
 ) -> RebalanceFrontier:
     """Solve the expected-net-P&L versus accumulated-P&L-risk frontier."""
 
@@ -283,40 +302,65 @@ def build_rebalance_frontier(
     risk_model = BarraFactorRiskModel()
     resolved_risk_measure = _resolve_risk_measure(ctx, risk_measure)
     scenario_tail_overlay_fraction = 0.0
+    optimization_scenario_count: int | None = None
+    tail_probability = min(2.0 * (1.0 - cvar_confidence), 0.5)
+    base_variance_weight = _economic_lambda_scale(
+        ctx,
+        risk_model,
+        impact_bps,
+        linear_bps,
+    )
+    base_cvar_weight = 0.0
+    tail_second_moment_scale = 0.0
     if resolved_risk_measure in {
         RebalanceRiskMeasure.DOWNSIDE_CVAR,
         RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+        RebalanceRiskMeasure.TAIL_SECOND_MOMENT,
     }:
         if not 0.0 < cvar_confidence < 1.0:
             raise ValueError("cvar_confidence must be strictly between zero and one")
-        centered_return_scenarios(ctx)
-        base_cvar_weight = _economic_cvar_weight_scale(
-            ctx,
-            impact_bps,
-            linear_bps,
-            cvar_confidence,
-        )
-        base_variance_weight = _economic_lambda_scale(
-            ctx,
-            risk_model,
-            impact_bps,
-            linear_bps,
-        )
-        if resolved_risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE:
+        scenarios, _ = centered_return_scenarios(ctx)
+        optimization_scenario_count = len(scenarios)
+        if resolved_risk_measure is RebalanceRiskMeasure.TAIL_SECOND_MOMENT:
+            tail_scenarios, _ = tail_return_scenarios(
+                ctx,
+                tail_probability=tail_probability,
+            )
+            optimization_scenario_count = len(tail_scenarios)
             scenario_tail_overlay_fraction = _scenario_tail_overlay_fraction(
                 ctx,
                 risk_model,
                 cvar_confidence,
             )
+            tail_second_moment_scale = _tail_second_moment_variance_scale(
+                ctx,
+                risk_model,
+                cvar_confidence,
+            )
+        elif max_optimization_scenarios is not None:
+            reduced_scenarios, _ = reduce_return_scenarios(
+                ctx,
+                max_scenarios=max_optimization_scenarios,
+            )
+            optimization_scenario_count = len(reduced_scenarios)
+        if resolved_risk_measure in {
+            RebalanceRiskMeasure.DOWNSIDE_CVAR,
+            RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+        }:
+            base_cvar_weight = _economic_cvar_weight_scale(
+                ctx,
+                impact_bps,
+                linear_bps,
+                cvar_confidence,
+            )
+            if resolved_risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE:
+                scenario_tail_overlay_fraction = _scenario_tail_overlay_fraction(
+                    ctx,
+                    risk_model,
+                    cvar_confidence,
+                )
         risk_metric_column = "loss_cvar_95_dollars"
     else:
-        base_variance_weight = _economic_lambda_scale(
-            ctx,
-            risk_model,
-            impact_bps,
-            linear_bps,
-        )
-        base_cvar_weight = 0.0
         risk_metric_column = "pnl_vol_dollars"
     if lambda_multipliers is None:
         lambda_multipliers = _default_lambda_multipliers(resolved_risk_measure)
@@ -331,27 +375,36 @@ def build_rebalance_frontier(
         variance_weight = (
             base_variance_weight * multiplier
             if resolved_risk_measure
-            in {RebalanceRiskMeasure.VARIANCE, RebalanceRiskMeasure.HYBRID_DOWNSIDE}
-            else 0.0
-        )
-        path_risk_weight = (
-            base_cvar_weight
-            * multiplier
-            * (
-                scenario_tail_overlay_fraction
-                if resolved_risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE
-                else 1.0
-            )
-            if resolved_risk_measure
             in {
-                RebalanceRiskMeasure.DOWNSIDE_CVAR,
+                RebalanceRiskMeasure.VARIANCE,
                 RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+                RebalanceRiskMeasure.TAIL_SECOND_MOMENT,
             }
             else 0.0
         )
+        if resolved_risk_measure is RebalanceRiskMeasure.TAIL_SECOND_MOMENT:
+            path_risk_weight = (
+                base_variance_weight * multiplier * tail_second_moment_scale
+            )
+        else:
+            path_risk_weight = (
+                base_cvar_weight
+                * multiplier
+                * (
+                    scenario_tail_overlay_fraction
+                    if resolved_risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE
+                    else 1.0
+                )
+                if resolved_risk_measure
+                in {
+                    RebalanceRiskMeasure.DOWNSIDE_CVAR,
+                    RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+                }
+                else 0.0
+            )
         candidate = (
             f"{resolved_risk_measure.value}__multiplier_{multiplier:.6g}"
-            f"__variance_{variance_weight:.6g}__cvar_{path_risk_weight:.6g}"
+            f"__variance_{variance_weight:.6g}__path_{path_risk_weight:.6g}"
         )
         if heterogeneous_tca:
             cost_terms = (
@@ -377,7 +430,16 @@ def build_rebalance_frontier(
             inventory_alpha_model=ExpectedReturnAlphaModel(),
             inventory_path_risk_weight=path_risk_weight,
             inventory_path_risk_model=(
-                ScenarioCVaRRiskModel(confidence=cvar_confidence)
+                (
+                    TailSecondMomentPathRiskModel(
+                        tail_probability=tail_probability,
+                    )
+                    if resolved_risk_measure is RebalanceRiskMeasure.TAIL_SECOND_MOMENT
+                    else ScenarioCVaRRiskModel(
+                        confidence=cvar_confidence,
+                        max_scenarios=max_optimization_scenarios,
+                    )
+                )
                 if path_risk_weight > 0
                 else None
             ),
@@ -401,6 +463,7 @@ def build_rebalance_frontier(
                     "candidate": candidate,
                     "risk_measure": resolved_risk_measure.value,
                     "scenario_tail_overlay_fraction": scenario_tail_overlay_fraction,
+                    "optimization_scenario_count": optimization_scenario_count,
                     "lambda_multiplier": multiplier,
                     "inventory_risk_weight": variance_weight,
                     "inventory_path_risk_weight": path_risk_weight,
@@ -415,6 +478,7 @@ def build_rebalance_frontier(
                 "candidate": candidate,
                 "risk_measure": resolved_risk_measure.value,
                 "scenario_tail_overlay_fraction": scenario_tail_overlay_fraction,
+                "optimization_scenario_count": optimization_scenario_count,
                 "lambda_multiplier": multiplier,
                 "inventory_risk_weight": variance_weight,
                 "inventory_path_risk_weight": path_risk_weight,
@@ -436,6 +500,7 @@ def build_rebalance_frontier(
         risk_measure=resolved_risk_measure,
         risk_metric_column=risk_metric_column,
         scenario_tail_overlay_fraction=scenario_tail_overlay_fraction,
+        optimization_scenario_count=optimization_scenario_count,
     )
 
 
@@ -609,7 +674,10 @@ def _default_lambda_multipliers(
 ) -> tuple[float, ...]:
     """Use a smaller grid for scenario models, which are costlier to solve."""
 
-    if risk_measure is RebalanceRiskMeasure.HYBRID_DOWNSIDE:
+    if risk_measure in {
+        RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+        RebalanceRiskMeasure.TAIL_SECOND_MOMENT,
+    }:
         return (0.0, 0.1, 0.3, 1.0, 2.0, 3.0, 10.0, 30.0, 100.0)
     if risk_measure is RebalanceRiskMeasure.DOWNSIDE_CVAR:
         return (0.0, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
@@ -700,6 +768,38 @@ def _economic_cvar_weight_scale(
         confidence=confidence,
     )
     return economic_dollars / max(full_cvar, gross / 10_000.0, 1e-12)
+
+
+def _tail_second_moment_variance_scale(
+    ctx: PlannerContext,
+    risk_model: BarraFactorRiskModel,
+    confidence: float,
+) -> float:
+    """Match tail-path variance to the scenario excess beyond covariance risk."""
+
+    target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+    target_positions = np.asarray(ctx.price, dtype=float) * target[None, :]
+    full_covariance_variance = 0.0
+    for date_index in range(len(ctx.dates)):
+        position_dollars = target_positions[date_index]
+        covariance = _security_covariance(ctx, date_index, risk_model)
+        full_covariance_variance += float(
+            position_dollars @ covariance @ position_dollars
+        )
+
+    tail_probability = min(2.0 * (1.0 - confidence), 0.5)
+    tail_scenarios, tail_weights = tail_return_scenarios(
+        ctx,
+        tail_probability=tail_probability,
+    )
+    tail_pnl = np.einsum("stn,tn->s", tail_scenarios, target_positions)
+    tail_second_moment = float(np.dot(tail_weights, np.square(tail_pnl)))
+    excess_fraction = _scenario_tail_overlay_fraction(ctx, risk_model, confidence)
+    return (
+        excess_fraction
+        * full_covariance_variance
+        / max(tail_second_moment, 1e-12)
+    )
 
 
 def _scenario_tail_overlay_fraction(

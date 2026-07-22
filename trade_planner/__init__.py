@@ -3,6 +3,7 @@
 from .alpha import ExpectedReturnAlphaModel, InventoryAlphaModel
 from .analytics import cumulative_side_completion
 from .calibration import (
+    DEFAULT_MAX_OPTIMIZATION_SCENARIOS,
     DEFAULT_RISK_PREFERENCES,
     CalibratedRebalancePlan,
     RebalanceEconomicMetrics,
@@ -68,7 +69,12 @@ from .diagnostics import diagnose_infeasible_problem, diagnose_problem, format_d
 from .downside import (
     InventoryPathRiskModel,
     ScenarioCVaRRiskModel,
+    TailSecondMomentPathRiskModel,
+    TailStressPathRiskModel,
     centered_return_scenarios,
+    reduce_return_scenarios,
+    tail_return_scenarios,
+    tail_stress_return_path,
     weighted_loss_var_cvar,
 )
 from .mosek_diagnostics import DiagnosticMOSEK
@@ -103,6 +109,7 @@ __all__ = [
     "DiagnosticMOSEK",
     "DailyGrossNotionalLimit",
     "DailyNetNotionalLimit",
+    "DEFAULT_MAX_OPTIMIZATION_SCENARIOS",
     "DEFAULT_RISK_PREFERENCES",
     "DirectionConstraint",
     "EarningsLinearPenalty",
@@ -131,6 +138,8 @@ __all__ = [
     "RiskModel",
     "RiskPreference",
     "ScenarioCVaRRiskModel",
+    "TailSecondMomentPathRiskModel",
+    "TailStressPathRiskModel",
     "SpecificRiskOverlay",
     "StaticCovarianceRiskModel",
     "TCALinearBpsCost",
@@ -153,6 +162,9 @@ __all__ = [
     "build_rebalance_frontier",
     "calibrate_rebalance_plan",
     "centered_return_scenarios",
+    "reduce_return_scenarios",
+    "tail_return_scenarios",
+    "tail_stress_return_path",
     "cumulative_side_completion",
     "days_to_next_event",
     "default_constraints",

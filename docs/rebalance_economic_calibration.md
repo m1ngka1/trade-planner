@@ -51,19 +51,24 @@ The calibration procedure is:
    use those surfaces directly in the objective. If impact is unavailable, use a
    conservative date-by-name volatility square-root fallback. Target-notional-
    weighted medians remain available only as a controlled scalar-cost ablation.
-2. Calculate separate basket-specific covariance and scenario-CVaR scales from
-   expected alpha/cost dollars divided by full-horizon variance or CVaR. This
-   removes dependence on whether a test basket uses one share or production-
-   sized orders.
+2. Calculate basket-specific covariance, scenario-CVaR, and conditional-tail-
+   variance scales from expected alpha/cost dollars and the full-target risk.
+   This removes dependence on whether a test basket uses one share or
+   production-sized orders.
 3. Estimate the scenario overlay as only the excess of full-basket scenario
    CVaR over covariance-implied normal expected shortfall. In this fixture that
    fraction is 5.44%; the user does not enter it.
-4. Apply one common internal frontier-strength multiplier to the covariance
+4. For medium, preserve the worst 10% full-basket scenario tail and compress
+   the remaining core into at most 96 weighted medoids for CVaR optimization.
+   For low, use the exact worst-10% conditional P&L second moment, scaled to the
+   same excess tail. Continue to use the full distribution for metrics and
+   selection.
+5. Apply one common internal frontier-strength multiplier to the covariance
    scale and the excess-tail scale, then solve the grid with identical
    constraints, forecasts, and TCA inputs.
-5. Measure expected alpha, impact, fees, net P&L, P&L volatility, 95% loss VaR,
+6. Measure expected alpha, impact, fees, net P&L, P&L volatility, 95% loss VaR,
    and loss CVaR for every solved schedule.
-6. Give each user label a risk budget inside the feasible frontier and select
+7. Give each user label a risk budget inside the feasible frontier and select
    the highest expected net P&L that stays inside that budget. Plans within one
    basis point of parent gross are treated as economically tied, and the
    lower-risk plan wins rather than spending risk for solver noise or a trivial
@@ -73,14 +78,14 @@ The calibration procedure is:
 |---|---:|---|
 | High risk aversion | 5% | Use the stable covariance frontier and stay very close to minimum risk |
 | Medium risk aversion | 50% | Spend risk when forecast alpha materially improves expected net P&L |
-| Low risk aversion | 100% | Allow the full frontier and pursue the highest material expected net P&L |
+| Low risk aversion | 100% | Use the fast tail-second-moment frontier and pursue the highest material expected net P&L |
 
 These percentages are portfolio policy, not mathematical necessities. They are
 central defaults that should later be validated against the desk's realized
 drawdown tolerance; users do not enter raw optimizer coefficients. With
-scenario data, `medium` and `low` use the hybrid excess-tail frontier. `High`
-uses covariance because the experiment found that optimizing the few most
-extreme scenarios added estimation risk without robust downside improvement.
+scenario data, `medium` uses the hybrid excess-tail frontier and `low` uses the
+conditional tail second moment. `High` uses covariance because the experiment
+found no material robust downside benefit from fitting its extreme tail.
 
 ## Recorded synthetic experiment
 
@@ -89,25 +94,29 @@ Japan, and the US, with country, sector, industry, and specific covariance.
 Urgent orders need 8.5 days of capacity, medium orders need 4.5 days, and small
 orders need one day. Expected rebalance alpha is concentrated near the common
 event. The tail model fits on 256 centered fat-tail scenarios with a 10% wrong-
-call regime. Every schedule is then evaluated on five separate 5,000-scenario
-samples whose seeds are not used by the optimizer.
+call regime. Automatic medium uses 96 tail-preserving weighted representatives;
+automatic low uses the roughly 26 paths covering the exact worst 10% mass.
+The full 256 scenarios remain the scaling and in-sample measurement
+distribution. Every schedule is then evaluated on five separate 5,000-scenario
+samples whose seeds are asserted to be disjoint from the optimizer seed.
 
 The current recorded outcomes are approximately:
 
 | Profile | Expected net P&L | P&L volatility | Replicated mean 95% loss CVaR | Late/early volume | Early max factor imbalance |
 |---|---:|---:|---:|---:|---:|
-| High, covariance policy | $645k | $3.78m | $8.49m | 1.72x | 5.47% |
-| Medium, covariance baseline | $750k | $3.99m | $8.99m | 1.00x | 3.83% |
-| Medium, automatic hybrid | $710k | $3.86m | $8.68m | 1.35x | 3.30% |
-| Medium, pure CVaR | $760k | $4.32m | $9.58m | 0.87x | 21.00% |
-| Low, covariance baseline | $817k | $4.52m | $10.10m | 0.51x | 8.46% |
-| Low, automatic hybrid | $816k | $4.51m | $10.08m | 0.52x | 8.38% |
-| Medium + strong forecast event liquidity | $710k | $3.57m | $8.05m | 2.70x | 2.77% |
+| High, covariance policy | $645k | $3.78m | $8.41m | 1.72x | 5.47% |
+| Medium, covariance baseline | $750k | $3.99m | $8.91m | 1.00x | 3.83% |
+| Medium, automatic hybrid | $710k | $3.86m | $8.60m | 1.35x | 3.22% |
+| Medium, pure CVaR | $733k | $4.15m | $9.18m | 0.96x | 23.45% |
+| Low, covariance baseline | $817k | $4.52m | $10.01m | 0.51x | 8.46% |
+| Low, hybrid-96 comparison | $816k | $4.51m | $9.98m | 0.52x | 8.20% |
+| Low, automatic tail second moment | $815k | $4.50m | $9.97m | 0.52x | 8.07% |
+| Medium + strong forecast event liquidity | $710k | $3.57m | $7.99m | 2.70x | 2.77% |
 
 The result is a genuine trade-off, not a claim that one profile dominates:
 
-- high risk aversion reduces P&L volatility by about 16% versus low while
-  giving up about $172k of expected net P&L;
+- high risk aversion reduces P&L volatility by about 16% versus automatic low
+  while giving up about $170k of expected net P&L;
 - the high profile begins urgent flow immediately, keeps small-order flow at
   solver dust until day 10, and produces 1.72x as much gross volume late in the
   horizon as early, without fixing a daily schedule;
@@ -120,19 +129,21 @@ The result is a genuine trade-off, not a claim that one profile dominates:
   $75k of P&L volatility. The scalar simplification is therefore discarded by
   the lower-risk tie-break;
 - pure sample CVaR is discarded: its medium profile increases independent-
-  sample loss CVaR by 6.5%, volatility by 8.2%, and early factor imbalance from
-  3.8% to 21.0%. It overfits a small set of tail scenarios and loses stable
+  sample loss CVaR by 3.0%, volatility by 4.0%, and early factor imbalance from
+  3.8% to 23.4%. It overfits a small set of tail scenarios and loses stable
   factor hedges;
 - the automatic hybrid medium profile retains covariance risk and prices only
   the 5.44% excess scenario tail. Against the variance medium profile it cuts
   replicated mean loss CVaR by 3.5% and volatility by 3.2%, improves early
-  factor imbalance from 3.83% to 3.30%, delays small orders from day 1 to day 4,
+  factor imbalance from 3.83% to 3.22%, delays small orders from day 1 to day 4,
   and raises late/early volume from 1.00x to 1.35x. Expected net P&L falls by
   $40k, inside the $48.7k one-basis-point tie band, so it is retained;
-- the automatic hybrid low profile is nearly economically identical to the
-  variance low profile and makes small but consistent risk improvements. The
-  hybrid high trial is discarded and the automatic high policy stays on the
-  covariance frontier;
+- the automatic low profile uses the conditional tail second moment. Across
+  five independent optimization samples it improves independent CVaR,
+  covariance volatility, and early factor balance every time, preserves urgent
+  and small start dates, gives up far less than one basis point of expected
+  P&L, and solves 22–54x faster than hybrid-96. Hybrid high is slightly worse in
+  independent CVaR and factor balance, so automatic high stays on covariance;
 - a moderate date-varying event-liquidity forecast improves medium-profile P&L
   volatility by about 8.0%, raises the late/early volume ratio from 1.00x to
   1.81x, and gives up only about $35k of expected net P&L—less than one basis
@@ -146,16 +157,29 @@ The result is a genuine trade-off, not a claim that one profile dominates:
 
 | Goal | Current evidence |
 |---|---|
-| Balance country/sector/industry early | Fixed shape benchmark: 1.6% early imbalance and 96.4% improvement over no-factor. Automatic hybrid medium: 3.30%, versus 3.83% for variance medium and 14.3% without factor risk. |
+| Balance country/sector/industry early | Fixed shape benchmark: 1.6% early imbalance and 96.4% improvement over no-factor. Automatic hybrid medium: 3.22%, versus 3.83% for variance medium and 14.3% without factor risk. |
 | Urgent names early, small orders may wait | Fixed shape benchmark: urgent day 1 and small day 8. Automatic high: urgent day 1 and small day 10. Automatic hybrid medium: urgent day 1 and small day 4. |
 | Gradually increase volume | Fixed shape benchmark: Spearman 1.0 and 4.30x late/early volume. Automatic hybrid improves medium from 1.00x to 1.35x; forecast event liquidity raises it to 2.70x without a schedule constraint. |
 | Optimizer-derived, not hard-coded | Capacity, factor risk, alpha, impact, scenario tail risk, and forecast ADV are inputs to one convex optimizer; none of the retained plans fixes daily trade amounts. |
-| Reduce P&L swing while preserving profit | Automatic hybrid medium cuts volatility 3.2% and replicated loss CVaR 3.5% for less than 1 bp of expected-P&L sacrifice. Strong forecast event liquidity cuts both by about 10.5% when that forecast is available. |
-| Automatic coefficients | Date/name TCA sets costs; basket economics scales covariance and CVaR; excess-tail data sets their relative weight; high/medium/low selects a solved plan with a 1 bp materiality rule. |
+| Reduce P&L swing while preserving profit | Automatic hybrid medium cuts volatility 3.2% and replicated loss CVaR 3.5% for less than 1 bp of expected-P&L sacrifice. Automatic low improves both risk measures across five optimization fits. Strong forecast event liquidity cuts both by about 10.5% when that forecast is available. |
+| Automatic coefficients | Date/name TCA sets costs; basket economics scales covariance and tail risk; excess-tail data chooses the relative weight; the risk label chooses the validated estimator/frontier and a 1 bp materiality rule selects the schedule. |
 
-The post-run feasibility audit across every recorded schedule found a maximum
-participation-cap excess of 0.0221 share, maximum wrong-direction solver dust of
-0.000026 share, and maximum terminal residual below 0.0000001 share.
+The separate [scenario-reduction experiment](scenario_reduction.md) records the
+full 256, reduced 96, and reduced 64 trials. The retained 96-scenario policy is
+3.93x faster, changes expected net P&L by only $442, slightly improves
+independent loss CVaR, and preserves urgent day 1, small day 4, early factor
+balance, and the late-volume ramp. The faster 64-scenario policy is discarded
+because it makes small orders start on day 1.
+
+The [tail-path experiment](tail_path_risk.md) records the conditional-mean and
+conditional-second-moment ideas across five independent optimization samples.
+It is the evidence for using tail second moment only for automatic low while
+keeping hybrid-96 for medium.
+
+The post-run feasibility audit across all 34 saved economic, reduction, and
+tail-stress schedules found a maximum participation-cap excess of 0.0221 share,
+maximum wrong-direction solver dust below 0.0004 share, and maximum terminal
+residual below 0.000001 share.
 
 The prior unitless fixed risk weight is retained only as a baseline. After
 tightening OSQP's feasibility tolerance it solves the realistic-dollar fixture,
@@ -182,8 +206,8 @@ The next high-value research steps are:
    spread, impact, and fill data;
 3. point-in-time scenario calibration by rebalance type, confidence, days to
    event, wrong-call frequency, and realized tail severity;
-4. scenario-reduction and solver work so the hybrid frontier is fast enough for
-   an interactive production planner; and
+4. solver warm starts or parallel frontier solves beyond the retained 3.9x
+   scenario-reduction speedup; and
 5. risk-profile defaults calibrated to realized PM drawdowns and alpha capture,
    not to the synthetic fixture.
 
@@ -211,5 +235,6 @@ Generated evidence:
   P&L, VaR, and loss-CVaR statistics;
 - `rebalance_economic_calibration_schedules.csv`: complete schedules for every
   solved trial; and
-- `rebalance_economic_calibration.png`: variance/pure-CVaR/hybrid frontiers,
-  daily volume, factor-risk ablation, and replicated loss-CVaR comparison.
+- `rebalance_economic_calibration.png`: variance, pure-CVaR, hybrid, and tail-
+  second-moment frontiers, daily volume, factor-risk ablation, and replicated
+  loss-CVaR comparison.

@@ -55,9 +55,10 @@ FACTOR_NAMES = (
 )
 RNG_SEED = 20260723
 N_SCENARIOS = 5_000
-EVALUATION_SEEDS = tuple(RNG_SEED + offset for offset in range(5))
 OPTIMIZATION_SCENARIO_SEED = 20260724
+EVALUATION_SEEDS = tuple(20260801 + offset for offset in range(5))
 N_OPTIMIZATION_SCENARIOS = 256
+assert OPTIMIZATION_SCENARIO_SEED not in EVALUATION_SEEDS
 EVENT_LIQUIDITY_CURVES = {
     "medium_event_liquidity": np.array([0.60, 0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.50, 1.80]),
     "strong_event_liquidity": np.array([0.40, 0.50, 0.60, 0.80, 1.00, 1.20, 1.40, 1.60, 2.00, 2.50]),
@@ -257,6 +258,12 @@ def run_experiment(
         profile.value: hybrid_frontier.select(profile)
         for profile in (RiskAversion.HIGH, RiskAversion.MEDIUM, RiskAversion.LOW)
     }
+    tail_second_frontier = build_rebalance_frontier(
+        ctx,
+        solver=solver,
+        risk_measure=RebalanceRiskMeasure.TAIL_SECOND_MOMENT,
+    )
+    tail_second_low = tail_second_frontier.select(RiskAversion.LOW)
     impact_bps, linear_bps = infer_execution_costs(ctx)
     impact_matrix, linear_matrix = infer_execution_cost_matrices(ctx)
     medium_weight = selections["medium"].config.inventory_risk_weight
@@ -283,6 +290,7 @@ def run_experiment(
             for name, plan in hybrid_selections.items()
         }
     )
+    trial_schedules["tail_second_profile_low"] = tail_second_low.result.schedule
     trial_contexts = {trial: ctx for trial in trial_schedules}
     scalar_frontier = build_rebalance_frontier(
         ctx,
@@ -466,6 +474,10 @@ def run_experiment(
         profile: _candidate_for_result(hybrid_frontier.results, plan.result)
         for profile, plan in hybrid_selections.items()
     }
+    tail_second_selected_candidate = _candidate_for_result(
+        tail_second_frontier.results,
+        tail_second_low.result,
+    )
     frontier_output = frontier.frontier.copy()
     frontier_output["selected_profile"] = ""
     for profile, candidate in selected_candidates.items():
@@ -487,8 +499,19 @@ def run_experiment(
             hybrid_frontier_output["candidate"] == candidate,
             "selected_profile",
         ] = profile
+    tail_second_frontier_output = tail_second_frontier.frontier.copy()
+    tail_second_frontier_output["selected_profile"] = ""
+    tail_second_frontier_output.loc[
+        tail_second_frontier_output["candidate"] == tail_second_selected_candidate,
+        "selected_profile",
+    ] = "low"
     frontier_output = pd.concat(
-        [frontier_output, cvar_frontier_output, hybrid_frontier_output],
+        [
+            frontier_output,
+            cvar_frontier_output,
+            hybrid_frontier_output,
+            tail_second_frontier_output,
+        ],
         ignore_index=True,
     )
 
@@ -506,6 +529,7 @@ def run_experiment(
         "selections": selections,
         "cvar_selections": cvar_selections,
         "hybrid_selections": hybrid_selections,
+        "tail_second_low": tail_second_low,
         "scenario_tail_overlay_fraction": (
             hybrid_frontier.scenario_tail_overlay_fraction
         ),
@@ -695,6 +719,8 @@ def _idea_for(trial: str) -> str:
         return "Penalize worst-tail path P&L using centered fat-tail event scenarios."
     if trial.startswith("hybrid_profile_"):
         return "Automatically price covariance risk plus only the excess scenario tail."
+    if trial == "tail_second_profile_low":
+        return "Price the excess tail with its conditional second moment instead of CVaR slacks."
     if trial.startswith("hybrid_medium_"):
         return "Add a scaled downside-CVaR overlay while retaining covariance factor risk."
     if trial.startswith("profile_"):
@@ -727,7 +753,7 @@ def _decision_for(row: pd.Series, trials: pd.DataFrame, parent_gross: float) -> 
         )
         improves_tail = (
             row["scenario_loss_cvar_95_mean_dollars"]
-            < baseline["scenario_loss_cvar_95_mean_dollars"]
+            <= 0.9975 * baseline["scenario_loss_cvar_95_mean_dollars"]
         )
         respects_mechanics = (
             row["urgent_first_trade_day"] <= baseline["urgent_first_trade_day"]
@@ -749,7 +775,7 @@ def _decision_for(row: pd.Series, trials: pd.DataFrame, parent_gross: float) -> 
         )
         improves_tail = (
             row["scenario_loss_cvar_95_mean_dollars"]
-            < baseline["scenario_loss_cvar_95_mean_dollars"]
+            <= 0.9975 * baseline["scenario_loss_cvar_95_mean_dollars"]
         )
         factor_ceiling = max(
             baseline["early_factor_imbalance_pct"] + 1.0,
@@ -767,6 +793,30 @@ def _decision_for(row: pd.Series, trials: pd.DataFrame, parent_gross: float) -> 
             if economically_tied and improves_tail and respects_mechanics
             else "discard"
         )
+    if trial == "tail_second_profile_low":
+        baseline = trials.loc[trials["trial"] == "hybrid_profile_low"].iloc[0]
+        economically_tied = (
+            row["expected_net_pnl_dollars"]
+            >= baseline["expected_net_pnl_dollars"] - parent_gross / 10_000.0
+        )
+        improves_risk = (
+            row["scenario_loss_cvar_95_mean_dollars"]
+            < baseline["scenario_loss_cvar_95_mean_dollars"]
+            and row["pnl_vol_dollars"] < baseline["pnl_vol_dollars"]
+        )
+        respects_mechanics = (
+            row["urgent_first_trade_day"] <= baseline["urgent_first_trade_day"]
+            and row["small_first_trade_day"] >= baseline["small_first_trade_day"]
+            and row["early_factor_imbalance_pct"]
+            <= baseline["early_factor_imbalance_pct"]
+            and row["late_early_gross_ratio"]
+            >= 0.90 * baseline["late_early_gross_ratio"]
+        )
+        return (
+            "keep"
+            if economically_tied and improves_risk and respects_mechanics
+            else "discard"
+        )
     if trial.startswith("hybrid_medium_"):
         medium = trials.loc[trials["trial"] == "profile_medium"].iloc[0]
         economically_tied = (
@@ -775,7 +825,7 @@ def _decision_for(row: pd.Series, trials: pd.DataFrame, parent_gross: float) -> 
         )
         improves_tail = (
             row["scenario_loss_cvar_95_mean_dollars"]
-            < medium["scenario_loss_cvar_95_mean_dollars"]
+            <= 0.9975 * medium["scenario_loss_cvar_95_mean_dollars"]
         )
         respects_mechanics = (
             row["urgent_first_trade_day"] <= medium["urgent_first_trade_day"]
@@ -839,6 +889,7 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
     frontier_styles = {
         "variance": ("#8A929A", "Variance frontier", "-"),
         "hybrid_downside": ("#7C5C9E", "Automatic hybrid frontier", "-"),
+        "tail_second_moment": ("#2F6B9A", "Tail second-moment frontier", "-"),
         "downside_cvar": ("#B7BDC3", "Pure CVaR frontier (discarded)", "--"),
     }
     for risk_measure, (color, label, line_style) in frontier_styles.items():
@@ -880,6 +931,18 @@ def plot_results(outputs: dict[str, pd.DataFrame], metadata: dict[str, object], 
             label=f"Hybrid {profile}{decision_suffix}",
             zorder=5,
         )
+    row = trials.loc["tail_second_profile_low"]
+    axis.scatter(
+        row["pnl_vol_dollars"] / 1_000.0,
+        row["expected_net_pnl_dollars"] / 1_000.0,
+        s=82,
+        marker="s",
+        facecolors="none",
+        edgecolors="#2F6B9A",
+        linewidths=1.8,
+        label="Tail second-moment low",
+        zorder=6,
+    )
     axis.set_title("Expected net P&L versus accumulated P&L risk")
     axis.set_xlabel("P&L volatility ($000)")
     axis.set_ylabel("Expected net P&L ($000)")

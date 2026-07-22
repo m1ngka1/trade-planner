@@ -33,17 +33,30 @@ class ScenarioCVaRRiskModel:
     """
 
     confidence: float = 0.95
+    max_scenarios: int | None = None
+    tail_probability: float = 0.10
 
     def __post_init__(self) -> None:
         if not 0.0 < self.confidence < 1.0:
             raise ValueError("confidence must be strictly between zero and one")
+        if self.max_scenarios is not None:
+            _validate_max_scenarios(self.max_scenarios)
+        if not 0.0 < self.tail_probability < 1.0:
+            raise ValueError("tail_probability must be strictly between zero and one")
 
     def objective(
         self,
         cumulative_positions: Sequence[cp.Expression],
         ctx: PlannerContext,
     ) -> cp.Expression:
-        scenarios, weights = centered_return_scenarios(ctx)
+        if self.max_scenarios is None:
+            scenarios, weights = centered_return_scenarios(ctx)
+        else:
+            scenarios, weights = reduce_return_scenarios(
+                ctx,
+                max_scenarios=self.max_scenarios,
+                tail_probability=self.tail_probability,
+            )
         if len(cumulative_positions) != len(ctx.dates):
             raise ValueError("cumulative position path must match planner dates")
 
@@ -56,6 +69,75 @@ class ScenarioCVaRRiskModel:
         threshold = cp.Variable(name=f"inventory_cvar_{int(100 * self.confidence)}_threshold")
         tail_loss = cp.pos(loss - threshold)
         return threshold + cp.sum(cp.multiply(weights, tail_loss)) / (1.0 - self.confidence)
+
+
+@dataclass(frozen=True)
+class TailStressPathRiskModel:
+    """Penalize exposure to the scenario-derived adverse event path.
+
+    The worst full-basket scenarios define one conditional mean return path.
+    Treating tail versus non-tail observations as a centered two-state regime
+    turns exposure to that path into dollar P&L variance.  This captures
+    coherent cross-date call errors without one optimization variable per
+    scenario.
+    """
+
+    tail_probability: float = 0.10
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.tail_probability <= 0.5:
+            raise ValueError("tail_probability must be greater than zero and at most 0.5")
+
+    def objective(
+        self,
+        cumulative_positions: Sequence[cp.Expression],
+        ctx: PlannerContext,
+    ) -> cp.Expression:
+        if len(cumulative_positions) != len(ctx.dates):
+            raise ValueError("cumulative position path must match planner dates")
+        stress_path, regime_variance = tail_stress_return_path(
+            ctx,
+            tail_probability=self.tail_probability,
+        )
+        stress_pnl: cp.Expression | float = 0.0
+        for date_index, position_shares in enumerate(cumulative_positions):
+            position_dollars = cp.multiply(ctx.price[date_index], position_shares)
+            stress_pnl = stress_pnl + stress_path[date_index] @ position_dollars
+        return regime_variance * cp.square(stress_pnl)
+
+
+@dataclass(frozen=True)
+class TailSecondMomentPathRiskModel:
+    """Penalize the conditional second moment of adverse scenario P&L.
+
+    Unlike :class:`TailStressPathRiskModel`, this retains dispersion around the
+    conditional mean and can represent more than one wrong-call or market-tail
+    direction.  It is still a quadratic objective and needs no CVaR threshold
+    or hinge variables.
+    """
+
+    tail_probability: float = 0.10
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.tail_probability <= 0.5:
+            raise ValueError("tail_probability must be greater than zero and at most 0.5")
+
+    def objective(
+        self,
+        cumulative_positions: Sequence[cp.Expression],
+        ctx: PlannerContext,
+    ) -> cp.Expression:
+        if len(cumulative_positions) != len(ctx.dates):
+            raise ValueError("cumulative position path must match planner dates")
+        scenarios, weights = tail_return_scenarios(
+            ctx,
+            tail_probability=self.tail_probability,
+        )
+        scenario_pnl: cp.Expression | np.ndarray = np.zeros(len(scenarios), dtype=float)
+        for date_index, position_shares in enumerate(cumulative_positions):
+            position_dollars = cp.multiply(ctx.price[date_index], position_shares)
+            scenario_pnl = scenario_pnl + scenarios[:, date_index, :] @ position_dollars
+        return cp.sum(cp.multiply(weights, cp.square(scenario_pnl)))
 
 
 def centered_return_scenarios(ctx: PlannerContext) -> tuple[np.ndarray, np.ndarray]:
@@ -91,6 +173,151 @@ def centered_return_scenarios(ctx: PlannerContext) -> tuple[np.ndarray, np.ndarr
 
     mean = np.einsum("s,stn->tn", weights, scenarios)
     return scenarios - mean[None, :, :], weights
+
+
+def reduce_return_scenarios(
+    ctx: PlannerContext,
+    *,
+    max_scenarios: int,
+    tail_probability: float = 0.10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compress scenario risk while retaining the basket's adverse tail.
+
+    Every observation in the worst ``tail_probability`` of the full-target
+    path is retained when the requested limit permits it.  The remaining core
+    observations are sorted by the same loss score, divided into equal-mass
+    strata, and represented by the scenario nearest each stratum's weighted
+    centroid.  The representative receives the stratum's full probability.
+
+    The score depends on the supplied basket and return paths, not on a desired
+    execution schedule.  The reduced set is centered again so scenario risk
+    cannot become an accidental alpha forecast.
+    """
+
+    _validate_max_scenarios(max_scenarios)
+    if not 0.0 < tail_probability < 1.0:
+        raise ValueError("tail_probability must be strictly between zero and one")
+
+    scenarios, weights = centered_return_scenarios(ctx)
+    if len(scenarios) <= max_scenarios:
+        return scenarios.copy(), weights.copy()
+
+    target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+    reference_positions = np.asarray(ctx.price, dtype=float) * target[None, :]
+    reference_loss = -np.einsum("stn,tn->s", scenarios, reference_positions)
+    worst_first = np.argsort(-reference_loss, kind="stable")
+
+    ordered_weights = weights[worst_first]
+    probability_starts = np.cumsum(ordered_weights) - ordered_weights
+    tail_count = int(np.sum(probability_starts < tail_probability))
+    tail_count = min(max(tail_count, 1), max_scenarios - 1)
+    tail_indices = worst_first[:tail_count]
+    core_indices = worst_first[tail_count:]
+    core_slots = max_scenarios - tail_count
+
+    if len(core_indices) <= core_slots:
+        representative_indices = np.concatenate([tail_indices, core_indices])
+        reduced_weights = weights[representative_indices]
+    else:
+        flat = scenarios.reshape(len(scenarios), -1)
+        feature_scale = np.sqrt(np.einsum("s,sf->f", weights, np.square(flat)))
+        positive_scale = feature_scale[feature_scale > 1e-12]
+        scale_floor = float(np.median(positive_scale)) * 1e-6 if positive_scale.size else 1.0
+        feature_scale = np.maximum(feature_scale, max(scale_floor, 1e-12))
+
+        core_weights = weights[core_indices]
+        core_mass = float(np.sum(core_weights))
+        core_midpoints = (np.cumsum(core_weights) - 0.5 * core_weights) / core_mass
+        stratum_ids = np.minimum((core_midpoints * core_slots).astype(int), core_slots - 1)
+
+        core_representatives: list[int] = []
+        core_representative_weights: list[float] = []
+        for stratum in range(core_slots):
+            members = core_indices[stratum_ids == stratum]
+            if not len(members):
+                continue
+            member_weights = weights[members]
+            stratum_mass = float(np.sum(member_weights))
+            centroid = np.einsum("s,sf->f", member_weights, flat[members]) / stratum_mass
+            standardized_distance = np.sum(
+                np.square((flat[members] - centroid[None, :]) / feature_scale[None, :]),
+                axis=1,
+            )
+            representative = int(members[int(np.argmin(standardized_distance))])
+            core_representatives.append(representative)
+            core_representative_weights.append(stratum_mass)
+
+        representative_indices = np.concatenate(
+            [tail_indices, np.asarray(core_representatives, dtype=int)]
+        )
+        reduced_weights = np.concatenate(
+            [weights[tail_indices], np.asarray(core_representative_weights, dtype=float)]
+        )
+
+    reduced_weights = reduced_weights / np.sum(reduced_weights)
+    reduced = scenarios[representative_indices].copy()
+    reduced_mean = np.einsum("s,stn->tn", reduced_weights, reduced)
+    return reduced - reduced_mean[None, :, :], reduced_weights
+
+
+def tail_stress_return_path(
+    ctx: PlannerContext,
+    *,
+    tail_probability: float = 0.10,
+) -> tuple[np.ndarray, float]:
+    """Return the exact-mass adverse conditional path and regime variance.
+
+    Scenarios are ranked by full-target path loss.  The final observation is
+    split when necessary so the conditional mean always represents exactly the
+    requested probability mass, including for non-uniform scenario weights.
+    """
+
+    if not 0.0 < tail_probability <= 0.5:
+        raise ValueError("tail_probability must be greater than zero and at most 0.5")
+    tail_scenarios, tail_weights = tail_return_scenarios(
+        ctx,
+        tail_probability=tail_probability,
+    )
+    stress_path = np.einsum("s,stn->tn", tail_weights, tail_scenarios)
+    regime_variance = tail_probability / (1.0 - tail_probability)
+    return stress_path, regime_variance
+
+
+def tail_return_scenarios(
+    ctx: PlannerContext,
+    *,
+    tail_probability: float = 0.10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return adverse full-target scenarios with exact normalized tail mass."""
+
+    if not 0.0 < tail_probability <= 0.5:
+        raise ValueError("tail_probability must be greater than zero and at most 0.5")
+    scenarios, weights = centered_return_scenarios(ctx)
+    target = ctx.orders["target_shares"].reindex(ctx.symbols).to_numpy(float)
+    reference_positions = np.asarray(ctx.price, dtype=float) * target[None, :]
+    reference_loss = -np.einsum("stn,tn->s", scenarios, reference_positions)
+    worst_first = np.argsort(-reference_loss, kind="stable")
+
+    tail_weights = np.zeros_like(weights)
+    remaining = tail_probability
+    for scenario_index in worst_first:
+        if remaining <= 1e-15:
+            break
+        allocated = min(float(weights[scenario_index]), remaining)
+        tail_weights[scenario_index] = allocated
+        remaining -= allocated
+    if remaining > 1e-12:
+        raise ValueError("scenario probabilities do not cover the requested tail mass")
+
+    selected = tail_weights > 0.0
+    return scenarios[selected].copy(), tail_weights[selected] / tail_probability
+
+
+def _validate_max_scenarios(max_scenarios: int) -> None:
+    if isinstance(max_scenarios, bool) or int(max_scenarios) != max_scenarios:
+        raise ValueError("max_scenarios must be an integer of at least two")
+    if max_scenarios < 2:
+        raise ValueError("max_scenarios must be an integer of at least two")
 
 
 def weighted_loss_var_cvar(

@@ -21,9 +21,13 @@ from trade_planner import (
     build_context_from_provider,
     build_rebalance_frontier,
     calibrate_rebalance_plan,
+    centered_return_scenarios,
     default_constraints,
     infer_execution_cost_matrices,
     infer_execution_costs,
+    reduce_return_scenarios,
+    tail_return_scenarios,
+    tail_stress_return_path,
     weighted_loss_var_cvar,
 )
 from trade_planner.examples import ToyProvider
@@ -40,6 +44,80 @@ class RebalanceCalibrationTests(unittest.TestCase):
 
         self.assertEqual(loss_var, 5.0)
         self.assertEqual(loss_cvar, 10.0)
+
+    def test_tail_preserving_reduction_is_centered_deterministic_and_keeps_cvar(self) -> None:
+        ctx = _economic_context()
+        rng = np.random.default_rng(101)
+        scenarios = rng.normal(
+            scale=0.004,
+            size=(200, len(ctx.dates), len(ctx.symbols)),
+        )
+        target_sign = np.sign(ctx.orders["target_shares"].to_numpy(float))
+        scenarios[:20, 2:5, :] -= 0.025 * target_sign[None, None, :]
+        ctx = PlannerContext(
+            **{**ctx.__dict__, "return_residual_scenarios": scenarios}
+        )
+
+        reduced, reduced_weights = reduce_return_scenarios(
+            ctx,
+            max_scenarios=40,
+        )
+        repeated, repeated_weights = reduce_return_scenarios(
+            ctx,
+            max_scenarios=40,
+        )
+
+        self.assertEqual(reduced.shape, (40, len(ctx.dates), len(ctx.symbols)))
+        np.testing.assert_allclose(reduced, repeated)
+        np.testing.assert_allclose(reduced_weights, repeated_weights)
+        self.assertAlmostEqual(float(np.sum(reduced_weights)), 1.0)
+        np.testing.assert_allclose(
+            np.einsum("s,stn->tn", reduced_weights, reduced),
+            0.0,
+            atol=1e-12,
+        )
+
+        full, full_weights = centered_return_scenarios(ctx)
+        target = ctx.orders["target_shares"].to_numpy(float)
+        positions = ctx.price * target[None, :]
+        full_pnl = np.einsum("stn,tn->s", full, positions)
+        reduced_pnl = np.einsum("stn,tn->s", reduced, positions)
+        _, full_cvar = weighted_loss_var_cvar(full_pnl, full_weights)
+        _, reduced_cvar = weighted_loss_var_cvar(reduced_pnl, reduced_weights)
+        self.assertLess(abs(reduced_cvar / full_cvar - 1.0), 0.05)
+
+    def test_tail_stress_path_uses_exact_weighted_mass_and_is_adverse(self) -> None:
+        ctx = _economic_context()
+        signs = np.sign(ctx.orders["target_shares"].to_numpy(float))
+        scenarios = np.zeros((4, len(ctx.dates), len(ctx.symbols)), dtype=float)
+        scenarios[0] = -0.04 * signs[None, :]
+        scenarios[1] = -0.02 * signs[None, :]
+        weights = np.array([0.05, 0.10, 0.35, 0.50])
+        ctx = PlannerContext(
+            **{
+                **ctx.__dict__,
+                "return_residual_scenarios": scenarios,
+                "return_scenario_weights": weights,
+            }
+        )
+
+        stress_path, regime_variance = tail_stress_return_path(
+            ctx,
+            tail_probability=0.10,
+        )
+        tail_scenarios, tail_weights = tail_return_scenarios(
+            ctx,
+            tail_probability=0.10,
+        )
+
+        centered, _ = centered_return_scenarios(ctx)
+        np.testing.assert_allclose(tail_scenarios, centered[:2])
+        np.testing.assert_allclose(tail_weights, [0.5, 0.5])
+        np.testing.assert_allclose(stress_path, 0.5 * centered[0] + 0.5 * centered[1])
+        self.assertAlmostEqual(regime_variance, 0.10 / 0.90)
+        target = ctx.orders["target_shares"].to_numpy(float)
+        stress_pnl = float(np.sum(stress_path * ctx.price * target[None, :]))
+        self.assertLess(stress_pnl, 0.0)
 
     def test_expected_alpha_moves_profitable_flow_earlier(self) -> None:
         ctx = _economic_context()
@@ -153,10 +231,10 @@ class RebalanceCalibrationTests(unittest.TestCase):
         rng = np.random.default_rng(11)
         scenarios = rng.normal(
             scale=0.004,
-            size=(60, len(ctx.dates), len(ctx.symbols)),
+            size=(120, len(ctx.dates), len(ctx.symbols)),
         )
         target_sign = np.sign(ctx.orders["target_shares"].to_numpy(float))
-        scenarios[:6, 3:5, :] -= 0.04 * target_sign[None, None, :]
+        scenarios[:12, 3:5, :] -= 0.04 * target_sign[None, None, :]
         ctx = PlannerContext(
             **{**ctx.__dict__, "return_residual_scenarios": scenarios}
         )
@@ -171,6 +249,7 @@ class RebalanceCalibrationTests(unittest.TestCase):
         self.assertIs(frontier.risk_measure, RebalanceRiskMeasure.HYBRID_DOWNSIDE)
         self.assertEqual(frontier.risk_metric_column, "loss_cvar_95_dollars")
         self.assertGreater(frontier.scenario_tail_overlay_fraction, 0.0)
+        self.assertEqual(frontier.optimization_scenario_count, 96)
         self.assertTrue(
             any(
                 config.inventory_risk_weight > 0
@@ -179,6 +258,16 @@ class RebalanceCalibrationTests(unittest.TestCase):
             )
         )
         self.assertIs(plan.risk_measure, RebalanceRiskMeasure.HYBRID_DOWNSIDE)
+        medium_plan = calibrate_rebalance_plan(
+            ctx,
+            risk_aversion="medium",
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0, 3.0),
+        )
+        self.assertIs(
+            medium_plan.risk_measure,
+            RebalanceRiskMeasure.HYBRID_DOWNSIDE,
+        )
         high_plan = calibrate_rebalance_plan(
             ctx,
             risk_aversion="high",
@@ -186,6 +275,28 @@ class RebalanceCalibrationTests(unittest.TestCase):
             lambda_multipliers=(0.0, 1.0, 3.0),
         )
         self.assertIs(high_plan.risk_measure, RebalanceRiskMeasure.VARIANCE)
+        low_plan = calibrate_rebalance_plan(
+            ctx,
+            risk_aversion="low",
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0, 3.0),
+        )
+        self.assertIs(
+            low_plan.risk_measure,
+            RebalanceRiskMeasure.TAIL_SECOND_MOMENT,
+        )
+        self.assertEqual(low_plan.optimization_scenario_count, 12)
+
+    def test_auto_low_falls_back_to_covariance_without_scenarios(self) -> None:
+        plan = calibrate_rebalance_plan(
+            _economic_context(),
+            risk_aversion="low",
+            solver="CLARABEL",
+            lambda_multipliers=(0.0, 1.0, 3.0),
+        )
+
+        self.assertIs(plan.risk_measure, RebalanceRiskMeasure.VARIANCE)
+        self.assertIsNone(plan.optimization_scenario_count)
 
     def test_provider_economic_inputs_are_aligned_into_context(self) -> None:
         class AlphaProvider(ToyProvider):

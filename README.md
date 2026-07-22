@@ -214,7 +214,7 @@ The calibrated objective is:
 expected market impact + spread/fees
     - expected holding alpha
     + selected covariance coefficient * accumulated holding-P&L variance
-    + selected tail coefficient * path loss CVaR
+    + selected tail coefficient * path downside risk
 ```
 
 There is deliberately no separate alpha coefficient: forecast confidence is
@@ -230,8 +230,25 @@ prices only the scenario tail in excess of covariance-implied expected
 shortfall. Both risk coefficients are scaled from the basket's expected dollars;
 the user still chooses only a risk-aversion label. `high` uses the more stable
 covariance frontier because the recorded experiment found no robust benefit
-from fitting its extreme tail. `medium` and `low` use the hybrid frontier when
-scenario data is present, otherwise they fall back to covariance.
+from fitting its extreme tail. `medium` uses the hybrid frontier and `low` uses
+the quadratic tail second moment when scenario data is present; both fall back
+to covariance without scenarios.
+
+The final automatic policy is profile-specific because the recorded evidence
+does not support one estimator everywhere: `high` uses covariance, `medium`
+uses covariance plus 96-scenario excess-tail CVaR, and `low` uses covariance
+plus the worst-tail conditional P&L second moment. The low-profile quadratic
+tail model improved independent CVaR, volatility, and early factor balance in
+all five optimization-seed replications while solving 22–54 times faster than
+hybrid CVaR. Medium remains hybrid because the faster approximation failed one
+strict small-order timing gate. Users still select only the risk label.
+
+Scenario frontiers automatically retain every path in the worst 10% full-
+basket tail and compress the remaining core into at most 96 weighted
+representatives. Economic metrics and selection are still evaluated on the
+full input distribution. This preserved the selected medium-risk mechanics and
+independent loss CVaR while making the recorded frontier 3.9 times faster;
+passing `max_optimization_scenarios=None` requests an unreduced audit.
 
 `high` stays within the lowest 5% of feasible P&L risk, `medium` allows half of the
 feasible risk range when expected alpha pays for it, and `low` allows the full
@@ -246,12 +263,18 @@ Run the recorded economic experiment with:
 
 ```bash
 env PYTHONPATH=. python experiments/rebalance_economic_calibration.py
+env PYTHONPATH=. python experiments/scenario_reduction.py
+env PYTHONPATH=. python experiments/stress_path_seed_robustness.py \
+  --path-model second_moment
 ```
 
 See [Investment-driven rebalance calibration](docs/rebalance_economic_calibration.md)
 for the tested hypotheses, Monte Carlo validation, limitations, and artifact
-map. The economic experiment complements rather than replaces the fixed shape
-gates in `daily_volume_behavior.py`.
+map, and [Tail-preserving scenario reduction](docs/scenario_reduction.md) for
+the 256/96/64 runtime comparison. See
+[Scenario-derived tail path risk](docs/tail_path_risk.md) for the five-seed
+mean-stress and second-moment decisions. The economic experiment complements
+rather than replaces the fixed shape gates in `daily_volume_behavior.py`.
 
 ## CVXPY Model Diagnostics
 
